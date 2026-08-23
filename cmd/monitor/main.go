@@ -11,11 +11,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(conf)
 	client := bybit.NewClient(conf.ByBit)
 	body, err := client.GetPositions()
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(body)
+	fmt.Println(string(body))
 }

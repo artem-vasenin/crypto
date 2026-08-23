@@ -43,7 +43,7 @@ func NewClient(cfg config.ByBit) *Client {
 func (c *Client) GetPositions() ([]byte, error) {
 	const recvWindow = "5000"
 
-	queryString := "category=linear"
+	queryString := "category=linear&settleCoin=USDT"
 
 	timestamp := time.Now().UnixMilli()
 	timestampStr := strconv.FormatInt(timestamp, 10)
