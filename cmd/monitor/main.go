@@ -6,6 +6,7 @@ import (
 
 	"bybit_monitor/internal/bybit"
 	"bybit_monitor/internal/config"
+	"bybit_monitor/internal/monitor"
 )
 
 func main() {
@@ -21,7 +22,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	for _, position := range positions {
+	mon := monitor.New()
+
+	mon.UpdatePositions(positions)
+
+	for _, position := range mon.Positions() {
 		fmt.Printf(
 			"%s %s %sx PnL=%s\n",
 			position.Symbol,
