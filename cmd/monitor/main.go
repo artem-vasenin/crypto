@@ -35,4 +35,86 @@ func main() {
 			position.UnrealisedPnl,
 		)
 	}
+
+	wsClient, err := bybit.NewWebSocketClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer wsClient.Close()
+
+	fmt.Println("WebSocket connected")
+
+	err = wsClient.Authenticate(
+		cfg.ByBit.APIKey,
+		cfg.ByBit.Secret,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	message, err := wsClient.ReadMessage()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(string(message))
+
+	err = wsClient.Subscribe("position")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	message, err = wsClient.ReadMessage()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(string(message))
+
+	wsClient.StartHeartbeat()
+
+	messages := make(chan []byte)
+
+	go func() {
+		defer close(messages)
+
+		for {
+			message, err := wsClient.ReadMessage()
+			if err != nil {
+				log.Println("WebSocket read error:", err)
+				return
+			}
+
+			messages <- message
+		}
+	}()
+
+	for message := range messages {
+		wsMessage, err := bybit.ParseWebSocketMessage(message)
+		if err != nil {
+			log.Println("Parse WebSocket message error:", err)
+			continue
+		}
+
+		if wsMessage.Topic != "position" {
+			continue
+		}
+
+		fmt.Println()
+		fmt.Println("========== RAW WS ==========")
+		fmt.Println(string(message))
+		fmt.Println("=============================")
+
+		for _, position := range wsMessage.Data {
+			converted := position.ToPosition()
+
+			mon.UpdatePosition(converted)
+
+			fmt.Println()
+			fmt.Println("========== PARSED POSITION ==========")
+			fmt.Printf("%+v\n", converted)
+			fmt.Println("=====================================")
+		}
+	}
 }
