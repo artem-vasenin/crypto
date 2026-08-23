@@ -1,20 +1,33 @@
 package main
 
 import (
+	"fmt"
+	"log"
+
 	"bybit_monitor/internal/bybit"
 	"bybit_monitor/internal/config"
-	"fmt"
 )
 
 func main() {
-	conf, err := config.Load("configs/config.json")
+	cfg, err := config.Load("configs/config.json")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	client := bybit.NewClient(conf.ByBit)
-	body, err := client.GetPositions()
+
+	client := bybit.NewClient(cfg.ByBit)
+
+	positions, err := client.GetPositions()
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	fmt.Println(string(body))
+
+	for _, position := range positions {
+		fmt.Printf(
+			"%s %s %sx PnL=%s\n",
+			position.Symbol,
+			position.Side,
+			position.Leverage,
+			position.UnrealisedPnl,
+		)
+	}
 }
