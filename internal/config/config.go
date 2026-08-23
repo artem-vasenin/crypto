@@ -2,13 +2,16 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+
+	"github.com/joho/godotenv"
 )
 
 type ByBit struct {
 	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
-	Secret  string `json:"secret"`
+	APIKey  string `json:"-"`
+	Secret  string `json:"-"`
 }
 
 type Config struct {
@@ -16,6 +19,11 @@ type Config struct {
 }
 
 func Load(path string) (Config, error) {
+	err := godotenv.Load()
+	if err != nil && !os.IsNotExist(err) {
+		return Config{}, err
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
@@ -25,5 +33,13 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+
+	conf.ByBit.APIKey = os.Getenv("BYBIT_API_KEY")
+	conf.ByBit.Secret = os.Getenv("BYBIT_API_SECRET")
+
+	if conf.ByBit.Secret == "" || conf.ByBit.APIKey == "" {
+		return Config{}, errors.New("missing secret key")
+	}
+
 	return conf, nil
 }
