@@ -1,0 +1,7 @@
+{
+  "bybit": {
+    "base_url": "https://api.bybit.com",
+    "api_key": "",
+    "api_secret": ""
+  }
+}
