@@ -1,6 +1,7 @@
 package bybit
 
 type Position struct {
+	PositionIdx     int           `json:"positionIdx"`
 	Symbol          string        `json:"symbol"`
 	Side            string        `json:"side"`
 	Size            string        `json:"size"`

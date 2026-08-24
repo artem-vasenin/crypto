@@ -42,6 +42,7 @@ type wsPositionMessage struct {
 }
 
 type wsPosition struct {
+	PositionIdx     int           `json:"positionIdx"`
 	Symbol          string        `json:"symbol"`
 	Side            string        `json:"side"`
 	Size            string        `json:"size"`
@@ -68,6 +69,7 @@ type wsPosition struct {
 
 func (p wsPosition) ToPosition() Position {
 	return Position{
+		PositionIdx:     p.PositionIdx,
 		Symbol:          p.Symbol,
 		Side:            p.Side,
 		Size:            p.Size,
