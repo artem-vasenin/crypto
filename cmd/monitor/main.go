@@ -36,7 +36,9 @@ func main() {
 		)
 	}
 
-	wsClient, err := bybit.NewWebSocketClient()
+	wsClient, err := bybit.NewWebSocketClient(
+		cfg.ByBit.PrivateWebSocketURL,
+	)
 	if err != nil {
 		log.Fatal(err)
 	}

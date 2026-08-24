@@ -8,8 +8,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const privateWebSocketURL = "wss://stream.bybit.com/v5/private"
-
 type WebSocketClient struct {
 	conn *websocket.Conn
 }
@@ -95,9 +93,9 @@ func (p wsPosition) ToPosition() Position {
 	}
 }
 
-func NewWebSocketClient() (*WebSocketClient, error) {
+func NewWebSocketClient(url string) (*WebSocketClient, error) {
 	conn, _, err := websocket.DefaultDialer.Dial(
-		privateWebSocketURL,
+		url,
 		nil,
 	)
 	if err != nil {
