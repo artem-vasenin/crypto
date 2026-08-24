@@ -109,12 +109,33 @@ func main() {
 		for _, position := range wsMessage.Data {
 			converted := position.ToPosition()
 
-			mon.UpdatePosition(converted)
-
 			fmt.Println()
 			fmt.Println("========== PARSED POSITION ==========")
 			fmt.Printf("%+v\n", converted)
 			fmt.Println("=====================================")
+
+			event := mon.UpdatePosition(converted)
+
+			fmt.Println()
+			fmt.Println("========== POSITION EVENT ==========")
+			fmt.Printf("Type: %s\n", event.Type)
+			fmt.Printf("Symbol: %s\n", converted.Symbol)
+			fmt.Printf("Side: %s\n", converted.Side)
+
+			if len(event.Changes) > 0 {
+				fmt.Println("Changes:")
+
+				for _, change := range event.Changes {
+					fmt.Printf(
+						"  %s: %s → %s\n",
+						change.Field,
+						change.From,
+						change.To,
+					)
+				}
+			}
+
+			fmt.Println("====================================")
 		}
 	}
 }
