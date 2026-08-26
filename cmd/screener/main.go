@@ -139,8 +139,25 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Формируем имя выходного JSON-файла.
+	//
+	// Например:
+	//
+	// short-grid-screening.json
+	// long-grid-screening.json
+	// short-screening.json
+	// long-screening.json
+	//
+	// Это позволяет запускать несколько стратегий подряд,
+	// не перезаписывая предыдущий результат.
+	outputFile := fmt.Sprintf(
+		"%s-%s",
+		*strategy,
+		cfg.Output.File,
+	)
+
 	// Сохраняем результат в JSON-файл.
-	if err := output.WriteJSON(cfg.Output.File, result); err != nil {
+	if err := output.WriteJSON(outputFile, result); err != nil {
 		log.Fatal(err)
 	}
 
@@ -148,7 +165,7 @@ func main() {
 		"strategy=%s: generated %d candidates -> %s\n",
 		*strategy,
 		len(result.Candidates),
-		cfg.Output.File,
+		outputFile,
 	)
 }
 
