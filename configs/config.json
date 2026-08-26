@@ -1,0 +1,30 @@
+{
+  "bybit": {
+    "base_url": "https://api.bybit.com",
+    "category": "linear"
+  },
+  "filters": {
+    "max_price": 2.0,
+    "min_turnover_24h": 5000000,
+    "top_candidates": 20,
+    "prefilter_by_change_24h": true
+  },
+  "analysis": {
+    "kline_limit_15m": 300,
+    "kline_limit_1h": 300,
+    "kline_limit_4h": 300,
+    "kline_limit_5m": 300,
+    "pivot_window": 2,
+    "volume_baseline_bars": 48,
+    "orderbook_limit": 200,
+    "orderbook_depth_pct": [0.5, 1.0, 2.0],
+    "recent_trades_limit": 1000,
+    "oi_interval": "5min",
+    "oi_limit": 200,
+    "funding_limit": 200,
+    "concurrency": 5
+  },
+  "output": {
+    "file": "screening.json"
+  }
+}
