@@ -30,6 +30,16 @@ The strategy is selected using the `-strategy` command-line flag.
 
 ```bash
 go run ./cmd/screener -strategy short-grid
+```
+
+```bash
 go run ./cmd/screener -strategy short
+```
+
+```bash
 go run ./cmd/screener -strategy long-grid
+```
+
+```bash
 go run ./cmd/screener -strategy long
+```
