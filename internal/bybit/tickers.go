@@ -3,7 +3,7 @@ package bybit
 import (
 	"context"
 	"net/url"
-	"sc/models"
+	"universal-bybit-screener/models"
 )
 
 // Tickers получает snapshot всех linear-контрактов одним запросом.

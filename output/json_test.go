@@ -3,8 +3,8 @@ package output
 import (
 	"os"
 	"path/filepath"
-	"sc/models"
 	"testing"
+	"universal-bybit-screener/models"
 )
 
 func TestWriteJSONAtomic(t *testing.T) {

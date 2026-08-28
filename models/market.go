@@ -75,6 +75,7 @@ type Indicators struct {
 	ATR1hPct      float64 `json:"atr_1h_pct"`
 	ATR4hPct      float64 `json:"atr_4h_pct"`
 	VolumeRatio1h float64 `json:"volume_ratio_1h"`
+	VolumeTrend1h float64 `json:"volume_trend_1h"`
 }
 
 type Pivot struct {
@@ -106,6 +107,7 @@ type Levels struct {
 type Derivatives struct {
 	FundingRate        float64 `json:"funding_rate"`
 	FundingAvg         float64 `json:"funding_avg"`
+	FundingAvg24h      float64 `json:"funding_avg_24h"`
 	OpenInterest       float64 `json:"open_interest"`
 	OpenInterestChange float64 `json:"open_interest_change_pct"`
 	SpreadPct          float64 `json:"spread_pct"`
@@ -116,6 +118,7 @@ type OrderBookMetrics struct {
 	BidNotional  float64 `json:"bid_notional"`
 	AskNotional  float64 `json:"ask_notional"`
 	ImbalancePct float64 `json:"imbalance_pct"`
+	BidAskRatio  float64 `json:"bid_ask_ratio"`
 	Levels       int     `json:"levels"`
 }
 type StrategyResult struct {

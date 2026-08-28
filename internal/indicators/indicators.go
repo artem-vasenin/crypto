@@ -1,6 +1,6 @@
 package indicators
 
-import "sc/models"
+import "universal-bybit-screener/models"
 
 // RSI считает Wilder RSI. Ноль означает, что истории недостаточно.
 func RSI(c []models.Candle, period int) float64 {
@@ -83,4 +83,29 @@ func VolumeRatio(c []models.Candle, period int) float64 {
 		return 0
 	}
 	return c[len(c)-1].Volume / avg
+}
+
+// VolumeTrend сравнивает средний объём последних shortPeriod свечей
+// со средним объёмом предыдущих longPeriod свечей. Значение > 1 означает,
+// что активность растёт, < 1 — снижается. Это дополняет VolumeRatio,
+// который смотрит только на одну последнюю свечу.
+func VolumeTrend(c []models.Candle, shortPeriod, longPeriod int) float64 {
+	if shortPeriod <= 0 || longPeriod <= 0 || len(c) < shortPeriod+longPeriod {
+		return 0
+	}
+	shortStart := len(c) - shortPeriod
+	longStart := shortStart - longPeriod
+	shortSum, longSum := 0.0, 0.0
+	for i := shortStart; i < len(c); i++ {
+		shortSum += c[i].Volume
+	}
+	for i := longStart; i < shortStart; i++ {
+		longSum += c[i].Volume
+	}
+	shortAvg := shortSum / float64(shortPeriod)
+	longAvg := longSum / float64(longPeriod)
+	if longAvg == 0 {
+		return 0
+	}
+	return shortAvg / longAvg
 }

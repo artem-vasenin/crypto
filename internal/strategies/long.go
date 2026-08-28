@@ -1,6 +1,6 @@
 package strategies
 
-import "sc/models"
+import "universal-bybit-screener/models"
 
 // Long оценивает обычную направленную Long-позицию, а не Grid Bot.
 type Long struct{}

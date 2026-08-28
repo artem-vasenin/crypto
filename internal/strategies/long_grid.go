@@ -1,6 +1,6 @@
 package strategies
 
-import "sc/models"
+import "universal-bybit-screener/models"
 
 // LongGrid ищет условия для Grid Bot с преимуществом нижней/восходящей стороны.
 type LongGrid struct{}
@@ -45,6 +45,9 @@ func (LongGrid) Evaluate(m models.MarketData, i models.Indicators, s map[string]
 	}
 	if i.VolumeRatio1h > 1 {
 		score += 5
+	}
+	if i.VolumeTrend1h > 1.1 {
+		score += 2
 	}
 	if m.Ticker.FundingRate < 0 {
 		score += 3

@@ -1,8 +1,8 @@
 package strategies
 
 import (
-	"sc/models"
 	"testing"
+	"universal-bybit-screener/models"
 )
 
 func baseData() (models.MarketData, models.Indicators, map[string]models.Structure, models.Levels) {

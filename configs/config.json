@@ -4,14 +4,16 @@
     "max_price": 2.0,
     "min_turnover_24h": 5000000,
     "preselect_candidates": 60,
-    "top_candidates": 20
+    "top_candidates": 20,
+    "max_grid_spread_pct": 0.15
   },
   "analysis": {
     "kline_limit_15m": 300,
     "kline_limit_1h": 300,
     "kline_limit_4h": 300,
     "open_interest_limit": 50,
-    "funding_limit": 20
+    "funding_limit": 20,
+    "order_book_limit": 100
   },
   "concurrency": 8,
   "http_timeout": "10s",

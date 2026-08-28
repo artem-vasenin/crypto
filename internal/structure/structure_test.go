@@ -1,8 +1,8 @@
 package structure
 
 import (
-	"sc/models"
 	"testing"
+	"universal-bybit-screener/models"
 )
 
 func TestLevelsAreSortedNearestFirst(t *testing.T) {

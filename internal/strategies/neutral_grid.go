@@ -1,6 +1,6 @@
 package strategies
 
-import "sc/models"
+import "universal-bybit-screener/models"
 
 // NeutralGrid ищет не направление, а пригодный диапазон для двусторонней сетки.
 // Поэтому тренд штрафуется, а наличие двух границ, достаточная ширина диапазона
@@ -76,12 +76,23 @@ func (NeutralGrid) Evaluate(m models.MarketData, i models.Indicators, s map[stri
 	if i.VolumeRatio1h >= 0.7 && i.VolumeRatio1h <= 2.0 {
 		score += 3
 	}
+	// Для Neutral Grid предпочтительнее стабильный объём, а не резкий всплеск.
+	if i.VolumeTrend1h >= 0.8 && i.VolumeTrend1h <= 1.25 {
+		score += 4
+	} else if i.VolumeTrend1h > 2 || (i.VolumeTrend1h > 0 && i.VolumeTrend1h < 0.5) {
+		score -= 4
+	}
 	if m.Ticker.Price24hPcnt > -8 && m.Ticker.Price24hPcnt < 8 {
 		score += 3
 	} else if m.Ticker.Price24hPcnt > 20 || m.Ticker.Price24hPcnt < -20 {
 		score -= 5
 	}
 	if m.OrderBook.BidNotional > 0 || m.OrderBook.AskNotional > 0 {
+		if m.OrderBook.BidAskRatio >= 0.8 && m.OrderBook.BidAskRatio <= 1.25 {
+			score += 3
+		} else if m.OrderBook.BidAskRatio > 2 || (m.OrderBook.BidAskRatio > 0 && m.OrderBook.BidAskRatio < 0.5) {
+			score -= 4
+		}
 		if m.OrderBook.ImbalancePct > -25 && m.OrderBook.ImbalancePct < 25 {
 			score += 3
 		} else if m.OrderBook.ImbalancePct > 60 || m.OrderBook.ImbalancePct < -60 {

@@ -1,8 +1,8 @@
 package structure
 
 import (
-	"sc/models"
 	"sort"
+	"universal-bybit-screener/models"
 )
 
 // Analyze ищет локальные pivot high/low и сравнивает последние два экстремума.

@@ -58,6 +58,9 @@ func TestOrderBook(t *testing.T) {
 	if book.ImbalancePct <= 10 || book.ImbalancePct >= 12 {
 		t.Fatalf("imbalance = %.2f", book.ImbalancePct)
 	}
+	if book.BidAskRatio <= 1.25 || book.BidAskRatio >= 1.27 {
+		t.Fatalf("bid/ask ratio = %.2f", book.BidAskRatio)
+	}
 	if book.Levels != 4 {
 		t.Fatalf("levels = %d, want 4", book.Levels)
 	}

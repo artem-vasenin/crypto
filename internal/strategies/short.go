@@ -1,6 +1,6 @@
 package strategies
 
-import "sc/models"
+import "universal-bybit-screener/models"
 
 // Short оценивает обычную направленную Short-позицию.
 type Short struct{}

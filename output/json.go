@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sc/models"
+	"universal-bybit-screener/models"
 )
 
 // WriteJSON пишет во временный файл и затем атомарно заменяет целевой.

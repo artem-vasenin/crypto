@@ -6,13 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sc/config"
-	"sc/internal/analysis"
-	"sc/internal/bybit"
-	"sc/internal/strategies"
-	"sc/output"
 	"strconv"
 	"strings"
+	"universal-bybit-screener/config"
+	"universal-bybit-screener/internal/analysis"
+	"universal-bybit-screener/internal/bybit"
+	"universal-bybit-screener/internal/strategies"
+	"universal-bybit-screener/output"
 )
 
 func main() {

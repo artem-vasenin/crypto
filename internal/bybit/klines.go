@@ -3,8 +3,8 @@ package bybit
 import (
 	"context"
 	"net/url"
-	"sc/models"
 	"sort"
+	"universal-bybit-screener/models"
 )
 
 // Klines разворачивает ответ Bybit в хронологический порядок: старые свечи слева.

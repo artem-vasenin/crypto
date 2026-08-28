@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"sc/config"
-	"sc/internal/bybit"
-	"sc/internal/indicators"
-	"sc/internal/strategies"
-	"sc/internal/structure"
-	"sc/models"
+	"universal-bybit-screener/config"
+	"universal-bybit-screener/internal/bybit"
+	"universal-bybit-screener/internal/indicators"
+	"universal-bybit-screener/internal/strategies"
+	"universal-bybit-screener/internal/structure"
+	"universal-bybit-screener/models"
 )
 
 type Service struct {
@@ -25,9 +25,9 @@ func NewService(c *bybit.Client, cfg config.Config, s strategies.Strategy) *Serv
 	return &Service{client: c, cfg: cfg, strategy: s}
 }
 
-// Run сначала формирует широкий ликвидный пул, а не TOP по росту. Это ключевое
-// исправление: Neutral Grid и Long Grid не должны терять кандидатов из-за 24h роста.
-// После глубокой аналитики оставляются TOP-N по выбранной стратегии.
+// Run строит pipeline: сначала дешёвый фильтр ликвидности, затем глубокий
+// анализ ограниченного пула. В отличие от старой версии предварительный пул
+// не сортируется по росту 24h, иначе Neutral Grid теряет боковые монеты.
 func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	inst, err := s.client.Instruments(ctx)
 	if err != nil {
@@ -44,15 +44,17 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	filtered := make([]pair, 0)
 	for _, i := range inst {
 		t, ok := tickers[i.Symbol]
-		if !ok {
+		if !ok || t.LastPrice <= 0 || t.LastPrice > s.cfg.Filters.MaxPrice || t.Turnover24h < s.cfg.Filters.MinTurnover24h {
 			continue
 		}
-		if t.LastPrice <= 0 || t.LastPrice > s.cfg.Filters.MaxPrice || t.Turnover24h < s.cfg.Filters.MinTurnover24h {
+		// Для Grid уже на дешёвом этапе можно убрать заведомо дорогой спред.
+		// Long/Short оставляем без этого ограничения: им ликвидность важна,
+		// но требования к издержкам входа/выхода у них другие.
+		if isGridStrategy(s.strategy.Name()) && spreadPct(t) > s.cfg.Filters.MaxGridSpreadPct {
 			continue
 		}
 		filtered = append(filtered, pair{i, t})
 	}
-	// Предварительный пул сортируем по ликвидности, а не по направлению движения.
 	sort.Slice(filtered, func(i, j int) bool { return filtered[i].t.Turnover24h > filtered[j].t.Turnover24h })
 	if len(filtered) > s.cfg.Filters.PreselectCandidates {
 		filtered = filtered[:s.cfg.Filters.PreselectCandidates]
@@ -95,6 +97,17 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	return models.ScreeningResult{GeneratedAt: time.Now().UTC(), Strategy: s.strategy.Name(), Filters: s.cfg.Filters, Candidates: results}, nil
 }
 
+func isGridStrategy(name string) bool {
+	return name == "short-grid" || name == "long-grid" || name == "neutral-grid"
+}
+
+func spreadPct(t models.Ticker) float64 {
+	if t.LastPrice <= 0 || t.Bid1Price <= 0 || t.Ask1Price <= 0 {
+		return 0
+	}
+	return (t.Ask1Price - t.Bid1Price) / t.LastPrice * 100
+}
+
 // analyze собирает независимые данные параллельно и строит единый snapshot,
 // который затем без повторных API-запросов оценивают все пять стратегий.
 func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.Ticker) (models.Candidate, error) {
@@ -120,35 +133,39 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.
 		oiCh <- o
 	}()
 	go func() { f, _ := s.client.Funding(ctx, inst.Symbol, s.cfg.Analysis.FundingLimit); fundCh <- f }()
-	go func() { b, _ := s.client.OrderBook(ctx, inst.Symbol, 50); bookCh <- b }()
+	go func() { b, _ := s.client.OrderBook(ctx, inst.Symbol, s.cfg.Analysis.OrderBookLimit); bookCh <- b }()
 	a, b, d := <-ch15, <-ch1, <-ch4
-	oi := <-oiCh
-	fund := <-fundCh
-	book := <-bookCh
+	oi, fund, book := <-oiCh, <-fundCh, <-bookCh
 	if a.err != nil || b.err != nil || d.err != nil {
 		return models.Candidate{}, fmt.Errorf("kline error")
 	}
 	md := models.MarketData{Instrument: inst, Ticker: t, Candles15m: a.c, Candles1h: b.c, Candles4h: d.c, OpenInterest: oi, Funding: fund, OrderBook: book}
-	ind := models.Indicators{RSI15m: indicators.RSI(a.c, 14), RSI1h: indicators.RSI(b.c, 14), RSI4h: indicators.RSI(d.c, 14), ATR15m: indicators.ATR(a.c, 14), ATR1h: indicators.ATR(b.c, 14), ATR4h: indicators.ATR(d.c, 14), VolumeRatio1h: indicators.VolumeRatio(b.c, 20)}
+	ind := models.Indicators{
+		RSI15m:        indicators.RSI(a.c, 14),
+		RSI1h:         indicators.RSI(b.c, 14),
+		RSI4h:         indicators.RSI(d.c, 14),
+		ATR15m:        indicators.ATR(a.c, 14),
+		ATR1h:         indicators.ATR(b.c, 14),
+		ATR4h:         indicators.ATR(d.c, 14),
+		VolumeRatio1h: indicators.VolumeRatio(b.c, 20),
+		VolumeTrend1h: indicators.VolumeTrend(b.c, 5, 20),
+	}
 	if t.LastPrice > 0 {
 		ind.ATR1hPct = ind.ATR1h / t.LastPrice * 100
 		ind.ATR4hPct = ind.ATR4h / t.LastPrice * 100
 	}
-	structures := map[string]models.Structure{"15m": structure.Analyze(a.c, 2, 5), "1h": structure.Analyze(b.c, 2, 5), "4h": structure.Analyze(d.c, 2, 5)}
-	levels := structure.ApplyATR(structure.Levels(structures["1h"], t.LastPrice), ind.ATR1h, t.LastPrice)
-	der := models.Derivatives{FundingRate: t.FundingRate, OpenInterest: t.OpenInterest}
-	if len(fund) > 0 {
-		sum := 0.0
-		for _, x := range fund {
-			sum += x.Rate
-		}
-		der.FundingAvg = sum / float64(len(fund))
+	structures := map[string]models.Structure{
+		"15m": structure.Analyze(a.c, 2, 5),
+		"1h":  structure.Analyze(b.c, 2, 5),
+		"4h":  structure.Analyze(d.c, 2, 5),
 	}
+	levels := structure.ApplyATR(structure.Levels(structures["1h"], t.LastPrice), ind.ATR1h, t.LastPrice)
+	der := models.Derivatives{FundingRate: t.FundingRate, OpenInterest: t.OpenInterest, SpreadPct: spreadPct(t)}
+	der.FundingAvg24h = fundingAverage24h(fund)
+	// Сохраняем старое поле как совместимый alias, но теперь оно означает именно среднее за 24h.
+	der.FundingAvg = der.FundingAvg24h
 	if len(oi) >= 2 && oi[0].OpenInterest > 0 {
 		der.OpenInterestChange = (oi[len(oi)-1].OpenInterest/oi[0].OpenInterest - 1) * 100
-	}
-	if t.LastPrice > 0 && t.Ask1Price > 0 && t.Bid1Price > 0 {
-		der.SpreadPct = (t.Ask1Price - t.Bid1Price) / t.LastPrice * 100
 	}
 	var c models.Candidate
 	c.Symbol = inst.Symbol
@@ -173,6 +190,34 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.
 		c.Strategies[name] = st.Evaluate(md, ind, structures, levels)
 	}
 	return c, nil
+}
+
+// fundingAverage24h берёт только историю внутри 24 часов относительно
+// последней доступной точки. Это важно, потому что интервал funding у разных
+// контрактов может отличаться и может динамически меняться.
+func fundingAverage24h(points []models.FundingPoint) float64 {
+	if len(points) == 0 {
+		return 0
+	}
+	latest := points[0].Time
+	for _, p := range points[1:] {
+		if p.Time.After(latest) {
+			latest = p.Time
+		}
+	}
+	cutoff := latest.Add(-24 * time.Hour)
+	sum := 0.0
+	count := 0
+	for _, p := range points {
+		if !p.Time.Before(cutoff) && !p.Time.After(latest) {
+			sum += p.Rate
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / float64(count)
 }
 
 // changeN считает процентное изменение N свечей назад; если истории меньше N,

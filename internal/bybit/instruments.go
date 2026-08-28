@@ -3,7 +3,7 @@ package bybit
 import (
 	"context"
 	"net/url"
-	"sc/models"
+	"universal-bybit-screener/models"
 )
 
 // Instruments проходит pagination и оставляет только USDT linear perpetual.

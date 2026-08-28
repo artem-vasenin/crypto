@@ -3,10 +3,11 @@ package bybit
 import (
 	"context"
 	"net/url"
-	"sc/models"
+	"universal-bybit-screener/models"
 )
 
-// OrderBook получает верхние уровни стакана. Данные публичные, авторизация не нужна.
+// OrderBook получает верхние уровни стакана. Лимит задаётся конфигурацией,
+// чтобы не привязывать аналитику к одному фиксированному значению глубины. Данные публичные, авторизация не нужна.
 func (c *Client) OrderBook(ctx context.Context, symbol string, limit int) (models.OrderBookMetrics, error) {
 	q := url.Values{"category": {linear}, "symbol": {symbol}, "limit": {fmtInt(limit)}}
 	// Bybit отдаёт уровни как массивы [price, size]. Для простоты ниже
@@ -32,6 +33,11 @@ func (c *Client) OrderBook(ctx context.Context, symbol string, limit int) (model
 	total := out.BidNotional + out.AskNotional
 	if total > 0 {
 		out.ImbalancePct = (out.BidNotional - out.AskNotional) / total * 100
+	}
+	// Bid/ask ratio показывает, во сколько раз номинальная глубина bid
+	// превышает ask. Значение около 1 означает относительный баланс.
+	if out.AskNotional > 0 {
+		out.BidAskRatio = out.BidNotional / out.AskNotional
 	}
 	return out, nil
 }

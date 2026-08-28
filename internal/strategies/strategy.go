@@ -2,8 +2,8 @@ package strategies
 
 import (
 	"fmt"
-	"sc/models"
 	"strings"
+	"universal-bybit-screener/models"
 )
 
 // Strategy описывает единый интерфейс всех режимов скриннера.

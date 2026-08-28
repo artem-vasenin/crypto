@@ -25,13 +25,14 @@ type BybitConfig struct {
 }
 
 // FilterConfig разделяет предварительный пул и финальное число кандидатов.
-// Это важно для универсальности: нельзя отбирать рынок только по росту 24h,
-// иначе Neutral Grid будет терять хорошие боковые монеты ещё до анализа свечей.
+// max_grid_spread_pct применяется только к Grid-стратегиям: обычные Long/Short
+// не должны терять монеты только из-за требований сеточного бота к ликвидности.
 type FilterConfig struct {
 	MaxPrice            float64 `json:"max_price"`
 	MinTurnover24h      float64 `json:"min_turnover_24h"`
 	PreselectCandidates int     `json:"preselect_candidates"`
 	TopCandidates       int     `json:"top_candidates"`
+	MaxGridSpreadPct    float64 `json:"max_grid_spread_pct"`
 }
 
 type AnalysisConfig struct {
@@ -40,6 +41,7 @@ type AnalysisConfig struct {
 	KlineLimit4h      int `json:"kline_limit_4h"`
 	OpenInterestLimit int `json:"open_interest_limit"`
 	FundingLimit      int `json:"funding_limit"`
+	OrderBookLimit    int `json:"order_book_limit"`
 }
 
 type OutputConfig struct {
@@ -58,7 +60,8 @@ type rawConfig struct {
 	Output      OutputConfig   `json:"output"`
 }
 
-// Load читает JSON и сразу проверяет обязательные настройки.
+// Load читает JSON, преобразует duration и проверяет критичные значения.
+// Ошибка конфигурации должна обнаруживаться до первого обращения к Bybit.
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -80,11 +83,26 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("retry_delay: %w", err)
 	}
-	if r.Bybit.BaseURL == "" || r.Filters.MaxPrice <= 0 || r.Filters.MinTurnover24h <= 0 || r.Filters.PreselectCandidates <= 0 || r.Filters.TopCandidates <= 0 || r.Filters.PreselectCandidates < r.Filters.TopCandidates || r.Concurrency <= 0 {
+	if r.Bybit.BaseURL == "" || r.Filters.MaxPrice <= 0 || r.Filters.MinTurnover24h <= 0 ||
+		r.Filters.PreselectCandidates <= 0 || r.Filters.TopCandidates <= 0 ||
+		r.Filters.PreselectCandidates < r.Filters.TopCandidates || r.Filters.MaxGridSpreadPct <= 0 ||
+		r.Concurrency <= 0 {
 		return Config{}, fmt.Errorf("invalid configuration values")
 	}
-	if r.Analysis.KlineLimit15m < 20 || r.Analysis.KlineLimit1h < 20 || r.Analysis.KlineLimit4h < 20 {
-		return Config{}, fmt.Errorf("kline limits must be at least 20")
+	if r.Analysis.KlineLimit15m < 20 || r.Analysis.KlineLimit1h < 20 || r.Analysis.KlineLimit4h < 20 ||
+		r.Analysis.OpenInterestLimit < 2 || r.Analysis.FundingLimit < 1 ||
+		r.Analysis.OrderBookLimit < 1 {
+		return Config{}, fmt.Errorf("invalid analysis limits")
 	}
-	return Config{Bybit: r.Bybit, Filters: r.Filters, Analysis: r.Analysis, Concurrency: r.Concurrency, HTTPTimeout: h, RunTimeout: run, MaxRetries: r.MaxRetries, RetryDelay: delay, Output: r.Output}, nil
+	return Config{
+		Bybit:       r.Bybit,
+		Filters:     r.Filters,
+		Analysis:    r.Analysis,
+		Concurrency: r.Concurrency,
+		HTTPTimeout: h,
+		RunTimeout:  run,
+		MaxRetries:  r.MaxRetries,
+		RetryDelay:  delay,
+		Output:      r.Output,
+	}, nil
 }

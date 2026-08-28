@@ -1,6 +1,6 @@
 package strategies
 
-import "sc/models"
+import "universal-bybit-screener/models"
 
 // ShortGrid ищет импульс вверх, который замедляется возле сопротивления.
 type ShortGrid struct{}
@@ -40,6 +40,12 @@ func (ShortGrid) Evaluate(m models.MarketData, i models.Indicators, s map[string
 	}
 	if i.VolumeRatio1h > 1.5 {
 		score += 4
+	}
+	if i.VolumeTrend1h > 1.2 {
+		score += 3
+	}
+	if len(m.Funding) > 0 && m.Funding[0].Rate > 0 {
+		score += 2
 	}
 	if m.Ticker.FundingRate > 0 {
 		score += 4

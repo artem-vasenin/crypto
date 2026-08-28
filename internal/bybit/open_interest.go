@@ -3,8 +3,8 @@ package bybit
 import (
 	"context"
 	"net/url"
-	"sc/models"
 	"sort"
+	"universal-bybit-screener/models"
 )
 
 // OpenInterest возвращает OI в хронологическом порядке, чтобы изменение OI

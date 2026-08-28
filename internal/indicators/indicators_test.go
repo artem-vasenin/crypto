@@ -1,8 +1,8 @@
 package indicators
 
 import (
-	"sc/models"
 	"testing"
+	"universal-bybit-screener/models"
 )
 
 func candles(values ...float64) []models.Candle {
@@ -32,5 +32,19 @@ func TestVolumeRatio(t *testing.T) {
 	r := VolumeRatio(c, 5)
 	if r != 2 {
 		t.Fatalf("volume ratio = %.2f, want 2", r)
+	}
+}
+
+func TestVolumeTrend(t *testing.T) {
+	c := candles(1, 2, 3, 4, 5, 6, 7, 8)
+	for i := range c {
+		c[i].Volume = 100
+	}
+	for i := 5; i < len(c); i++ {
+		c[i].Volume = 200
+	}
+	r := VolumeTrend(c, 3, 3)
+	if r != 2 {
+		t.Fatalf("volume trend = %.2f, want 2", r)
 	}
 }

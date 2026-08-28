@@ -3,8 +3,8 @@ package bybit
 import (
 	"context"
 	"net/url"
-	"sc/models"
 	"sort"
+	"universal-bybit-screener/models"
 )
 
 // Funding также сортируем по времени, чтобы средние и изменения не зависели
