@@ -1,184 +1,152 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
-	"log"
-	"time"
-
-	"bybit-screener/internal/bybit"
-	"bybit-screener/internal/config"
-	"bybit-screener/internal/output"
-	"bybit-screener/internal/screener"
-)
-
-// Стратегии, поддерживаемые скринером.
-//
-// Мы используем строковые значения, потому что именно они
-// передаются через командную строку и записываются в JSON.
-const (
-	strategyShortGrid = "short-grid"
-	strategyLongGrid  = "long-grid"
-	strategyShort     = "short"
-	strategyLong      = "long"
+	"os"
+	"sc/config"
+	"sc/internal/analysis"
+	"sc/internal/bybit"
+	"sc/internal/strategies"
+	"sc/output"
+	"strconv"
+	"strings"
 )
 
 func main() {
-	// Путь к конфигурационному файлу.
-	//
-	// По умолчанию используется:
-	// configs/config.json
-	configPath := flag.String(
-		"config",
-		"configs/config.json",
-		"path to config file",
-	)
-
-	// Основной флаг запуска.
-	//
-	// Например:
-	//
-	// go run ./cmd/screener -strategy short-grid
-	//
-	// Если флаг не указан, по умолчанию запускается short-grid.
-	strategy := flag.String(
-		"strategy",
-		strategyShortGrid,
-		"screening strategy: short-grid, long-grid, short, long",
-	)
-
-	// Переопределяем стандартный текст справки flag.
-	//
-	// Это необязательно для работы программы, но делает
-	// запуск намного понятнее.
-	flag.Usage = func() {
-		fmt.Println("Bybit Screener")
-		fmt.Println()
-		fmt.Println("Usage:")
-		fmt.Println("  go run ./cmd/screener [flags]")
-		fmt.Println()
-		fmt.Println("Flags:")
-
-		flag.PrintDefaults()
-
-		fmt.Println()
-		fmt.Println("Examples:")
-		fmt.Println("  Short Grid:")
-		fmt.Println("    go run ./cmd/screener -strategy short-grid")
-		fmt.Println()
-		fmt.Println("  Long Grid:")
-		fmt.Println("    go run ./cmd/screener -strategy long-grid")
-		fmt.Println()
-		fmt.Println("  Short:")
-		fmt.Println("    go run ./cmd/screener -strategy short")
-		fmt.Println()
-		fmt.Println("  Long:")
-		fmt.Println("    go run ./cmd/screener -strategy long")
-		fmt.Println()
-		fmt.Println("  Custom config:")
-		fmt.Println("    go run ./cmd/screener -config configs/config.json -strategy short-grid")
-	}
-
+	// Защита от panic оставляет консоль открытой на Windows, чтобы ошибку можно было прочитать.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println()
+			fmt.Println("========================================")
+			fmt.Println("КРИТИЧЕСКАЯ ОШИБКА")
+			fmt.Println("========================================")
+			fmt.Printf("%v\n", r)
+			waitForEnter()
+		}
+	}()
+	strategyName := flag.String("strategy", "", "short-grid, short, long-grid, long, neutral-grid")
+	configPath := flag.String("config", "configs/config.json", "configuration file")
 	flag.Parse()
-
-	// Проверяем стратегию сразу после разбора аргументов.
-	//
-	// Это важно: если пользователь случайно напишет:
-	//
-	// -strategy shrot-grid
-	//
-	// программа не должна начинать обращаться к Bybit.
-	if !isValidStrategy(*strategy) {
-		log.Fatalf(
-			"unknown strategy %q; allowed values: %s, %s, %s, %s",
-			*strategy,
-			strategyShortGrid,
-			strategyLongGrid,
-			strategyShort,
-			strategyLong,
-		)
+	scanner := bufio.NewScanner(os.Stdin)
+	if strings.TrimSpace(*strategyName) == "" {
+		*strategyName = selectStrategy(scanner)
 	}
-
-	// Загружаем конфигурацию.
+	fmt.Println()
+	fmt.Println("========================================")
+	fmt.Println("ЗАПУСК СКРИННЕРА")
+	fmt.Println("========================================")
+	fmt.Printf("Стратегия: %s\n", *strategyName)
+	fmt.Println()
+	fmt.Println("1/5 Загрузка конфигурации...")
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatal(err)
+		handleError("Ошибка загрузки конфигурации", err, scanner)
+		return
 	}
-
-	// Ограничиваем максимальное время работы одного запуска.
-	//
-	// При большом количестве кандидатов screener делает
-	// достаточно много запросов к Bybit, поэтому timeout
-	// защищает программу от зависания навсегда.
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		5*time.Minute,
-	)
-	defer cancel()
-
-	// Создаём публичный Bybit API client.
-	//
-	// Для получения market data API key не требуется.
-	client := bybit.NewClient(cfg.Bybit.BaseURL)
-
-	// Создаём screener и передаём ему конфигурацию.
-	sc := &screener.Screener{
-		Client: client,
-		Config: cfg,
-	}
-
-	// Запускаем анализ именно выбранной стратегии.
-	//
-	// strategy одновременно используется:
-	//
-	// 1. для выбора нужного score при сортировке кандидатов;
-	// 2. для записи primary_strategy в итоговый JSON.
-	result, err := sc.Run(ctx, *strategy)
+	fmt.Println("    Конфигурация загружена.")
+	fmt.Println()
+	fmt.Println("2/5 Создание стратегии...")
+	strategy, err := strategies.New(*strategyName)
 	if err != nil {
-		log.Fatal(err)
+		handleError("Ошибка создания стратегии", err, scanner)
+		return
 	}
-
-	// Формируем имя выходного JSON-файла.
-	//
-	// Например:
-	//
-	// short-grid-screening.json
-	// long-grid-screening.json
-	// short-screening.json
-	// long-screening.json
-	//
-	// Это позволяет запускать несколько стратегий подряд,
-	// не перезаписывая предыдущий результат.
-	outputFile := fmt.Sprintf(
-		"%s-%s",
-		*strategy,
-		cfg.Output.File,
-	)
-
-	// Сохраняем результат в JSON-файл.
-	if err := output.WriteJSON(outputFile, result); err != nil {
-		log.Fatal(err)
+	fmt.Printf("    Стратегия создана: %s\n\n", strategy.Name())
+	fmt.Println("3/5 Создание HTTP-клиента Bybit...")
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
+	defer cancel()
+	client := bybit.NewClient(bybit.ClientConfig{BaseURL: cfg.Bybit.BaseURL, HTTPTimeout: cfg.HTTPTimeout, MaxRetries: cfg.MaxRetries, RetryDelay: cfg.RetryDelay})
+	fmt.Println("    Клиент Bybit создан.")
+	fmt.Println()
+	fmt.Println("4/5 Запуск анализа...")
+	result, err := analysis.NewService(client, cfg, strategy).Run(ctx)
+	if err != nil {
+		handleError("Ошибка во время анализа", err, scanner)
+		return
 	}
-
-	fmt.Printf(
-		"strategy=%s: generated %d candidates -> %s\n",
-		*strategy,
-		len(result.Candidates),
-		outputFile,
-	)
+	fmt.Printf("    Анализ успешно завершён. Кандидатов: %d\n\n", len(result.Candidates))
+	fmt.Println("5/5 Сохранение JSON...")
+	outFileName := strategy.Name() + "-" + cfg.Output.File
+	if err := output.WriteJSON(outFileName, result); err != nil {
+		handleError("Ошибка сохранения JSON", err, scanner)
+		return
+	}
+	fmt.Println()
+	fmt.Println("========================================")
+	fmt.Println("SCREENING COMPLETED")
+	fmt.Println("========================================")
+	fmt.Printf("Strategy:   %s\nCandidates: %d\nJSON:       %s\n", strategy.Name(), len(result.Candidates), outFileName)
+	fmt.Println("========================================")
+	fmt.Println()
+	waitForEnterWithScanner(scanner)
 }
 
-// isValidStrategy проверяет, поддерживает ли screener
-// переданную через командную строку стратегию.
-func isValidStrategy(strategy string) bool {
-	switch strategy {
-	case strategyShortGrid,
-		strategyLongGrid,
-		strategyShort,
-		strategyLong:
-		return true
-	default:
-		return false
+// selectStrategy показывает меню всех пяти аналитических режимов.
+func selectStrategy(scanner *bufio.Scanner) string {
+	for {
+		fmt.Println()
+		fmt.Println("========================================")
+		fmt.Println("BYBIT CRYPTO SCREENER")
+		fmt.Println("========================================")
+		fmt.Println()
+		fmt.Println("Выберите режим анализа:")
+		fmt.Println()
+		fmt.Println("  1. Short Grid")
+		fmt.Println("  2. Short")
+		fmt.Println("  3. Long Grid")
+		fmt.Println("  4. Long")
+		fmt.Println("  5. Neutral Grid")
+		fmt.Println()
+		fmt.Print("Введите номер режима: ")
+		if !scanner.Scan() {
+			fmt.Println("Не удалось прочитать выбор стратегии.")
+			waitForEnterWithScanner(scanner)
+			os.Exit(1)
+		}
+		choice, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
+		if err != nil {
+			fmt.Println("Ошибка: необходимо ввести число от 1 до 5.")
+			continue
+		}
+		switch choice {
+		case 1:
+			return "short-grid"
+		case 2:
+			return "short"
+		case 3:
+			return "long-grid"
+		case 4:
+			return "long"
+		case 5:
+			return "neutral-grid"
+		default:
+			fmt.Println("Ошибка: такого режима нет. Введите число от 1 до 5.")
+		}
 	}
+}
+
+// handleError выводит ошибку и ждёт Enter вместо log.Fatal/os.Exit.
+func handleError(message string, err error, scanner *bufio.Scanner) {
+	fmt.Println()
+	fmt.Println("========================================")
+	fmt.Println("ОШИБКА")
+	fmt.Println("========================================")
+	fmt.Println(message)
+	fmt.Printf("Подробности: %v\n", err)
+	fmt.Println("========================================")
+	waitForEnterWithScanner(scanner)
+}
+func waitForEnterWithScanner(scanner *bufio.Scanner) {
+	fmt.Print("Нажмите Enter для выхода...")
+	scanner.Scan()
+	fmt.Println()
+}
+func waitForEnter() {
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Print("Нажмите Enter для выхода...")
+	scanner.Scan()
+	fmt.Println()
 }

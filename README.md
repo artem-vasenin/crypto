@@ -1,45 +1,445 @@
-# Bybit Screener v2
+# Universal Bybit Crypto Screener
 
-Go 1.26 project for collecting public Bybit linear-USDT market data and generating a structured JSON snapshot for AI analysis.
+Учебный, но структурированный MVP скриннера для **Bybit USDT Perpetual** на Go 1.26.5.
 
-Screener does not open or manage trading positions.
+Проект анализирует рынок в пяти режимах:
 
-Its task is to:
+1. `short-grid` — поиск монет для Short Grid Bot.
+2. `short` — поиск ситуаций для обычной направленной Short-позиции.
+3. `long-grid` — поиск монет для Long Grid Bot.
+4. `long` — поиск ситуаций для обычной направленной Long-позиции.
+5. `neutral-grid` — поиск монет для Neutral Grid Bot.
 
-1. filter the Bybit market;
-2. collect detailed market data for selected coins;
-3. calculate technical and derivatives indicators;
-4. evaluate several trading strategies;
-5. select the best candidates for the requested strategy;
-6. save the result as JSON for further AI analysis.
+Скриннер **не открывает позиции и не выставляет ордера**. Scores — эвристический рейтинг для отбора кандидатов, а не гарантия прибыли.
 
----
+## Быстрый запуск
 
-## Supported strategies
+Требования:
 
-The screener supports four strategies:
+- Go 1.26.5 или совместимая версия;
+- доступ к публичному API Bybit.
 
-- `short-grid`
-- `long-grid`
-- `short`
-- `long`
+Запуск с меню:
 
-The strategy is selected using the `-strategy` command-line flag.
+```bash
+go run ./cmd/screener
+```
+
+Прямой запуск:
+
+```bash
+go run ./cmd/screener --strategy short-grid
+go run ./cmd/screener --strategy short
+go run ./cmd/screener --strategy long-grid
+go run ./cmd/screener --strategy long
+go run ./cmd/screener --strategy neutral-grid
+```
+
+Другой конфиг:
+
+```bash
+go run ./cmd/screener --strategy neutral-grid --config configs/config.json
+```
+
+После запуска создаётся файл вида:
+
+```text
+neutral-grid-screening.json
+short-grid-screening.json
+short-screening.json
+long-grid-screening.json
+long-screening.json
+```
+
+## Архитектура
+
+```text
+cmd/screener/main.go
+        |
+        v
+config/config.go ---- configs/config.json
+        |
+        v
+internal/analysis/service.go
+        |
+        +--> internal/bybit/*
+        |      +-- instruments
+        |      +-- tickers
+        |      +-- klines
+        |      +-- open interest
+        |      +-- funding
+        |      +-- order book
+        |
+        +--> internal/indicators/*
+        +--> internal/structure/*
+        +--> internal/strategies/*
+        |
+        v
+models/market.go
+        |
+        v
+output/json.go
+```
+
+### Главный принцип pipeline
+
+Сначала выполняются дешёвые запросы:
+
+```text
+Instruments + Tickers
+        |
+        v
+price + turnover filters
+        |
+        v
+ликвидный предварительный пул
+        |
+        v
+15m + 1h + 4h + OI + Funding + Order Book
+        |
+        v
+Indicators + Structure + Levels
+        |
+        v
+все 5 стратегий
+        |
+        v
+сортировка по выбранной стратегии
+        |
+        v
+TOP-N
+```
+
+Это важное отличие от старой версии. Раньше предварительный пул сортировался по `24h growth`. Это систематически смещало выборку в сторону пампящихся монет и было особенно плохо для Neutral Grid. Теперь предварительный пул сортируется по `turnover_24h`, то есть по ликвидности, а направление движения учитывается уже в scoring стратегий.
+
+## Стратегии
 
 ### Short Grid
 
-```bash
-go run ./cmd/screener -strategy short-grid
+Ищет сочетание:
+
+- сильного роста;
+- повышенной волатильности;
+- перегретого RSI;
+- признаков ослабления структуры;
+- близкого сопротивления;
+- повышенного объёма;
+- funding/OI confirmation;
+- приемлемого спреда и стакана.
+
+Это не просто «монета выросла — ставим Short Grid». Сильный продолжающийся тренд штрафуется.
+
+### Short
+
+Предназначена для обычной направленной Short-позиции.
+
+Основные факторы:
+
+- `LH` и `LL` на 1h/4h;
+- bearish momentum;
+- RSI без требования экстремальной перекупленности;
+- объём;
+- funding;
+- отсутствие бычьей структуры.
+
+Высокий RSI сам по себе больше не считается достаточным аргументом для Short.
+
+### Long Grid
+
+Ищет условия для Grid с преимуществом восходящей/нижней стороны:
+
+- `HH` + `HL`;
+- достаточная ATR;
+- наличие поддержки;
+- разумная ширина диапазона;
+- цена не должна быть слишком далеко от поддержки;
+- ликвидность.
+
+### Long
+
+Предназначена для обычной направленной Long-позиции:
+
+- `HH` + `HL`;
+- подтверждение на 4h;
+- momentum;
+- объём;
+- funding;
+- штраф за bearish structure.
+
+### Neutral Grid
+
+Главная новая стратегия.
+
+Она не пытается угадать направление. Она отвечает на вопрос:
+
+> Есть ли сейчас достаточно широкий и устойчивый диапазон, в котором цена может многократно двигаться между поддержкой и сопротивлением?
+
+Основные факторы:
+
+- отсутствие сильного тренда;
+- наличие ближайшей поддержки;
+- наличие ближайшего сопротивления;
+- ширина диапазона;
+- отношение ширины диапазона к ATR;
+- положение цены внутри диапазона;
+- умеренный RSI;
+- достаточная, но не экстремальная волатильность;
+- ликвидность;
+- спред;
+- баланс верхней части стакана.
+
+Особенно важны `range_width_pct`, `range_position_pct` и `range_to_atr_1h`.
+
+## Support / Resistance
+
+`internal/structure/structure.go` ищет pivot high/low.
+
+Важное исправление: уровни теперь сортируются по расстоянию от текущей цены.
+
+Гарантируется:
+
+```text
+Resistance[0] = ближайшее сопротивление
+Support[0]    = ближайшая поддержка
 ```
 
-```bash
-go run ./cmd/screener -strategy short
+В старой реализации порядок зависел от порядка pivot'ов, поэтому `Resistance[0]` не всегда был ближайшим уровнем.
+
+Дополнительно рассчитываются:
+
+- `nearest_resistance`;
+- `nearest_support`;
+- `range_width_pct`;
+- `range_position_pct`;
+- `range_to_atr_1h`.
+
+`range_position_pct`:
+
+```text
+0%   = поддержка
+50%  = середина диапазона
+100% = сопротивление
 ```
 
-```bash
-go run ./cmd/screener -strategy long-grid
+Для Neutral Grid центральная часть диапазона предпочтительнее нахождения непосредственно возле одной из границ.
+
+## Indicators
+
+Сейчас рассчитываются:
+
+- RSI 15m;
+- RSI 1h;
+- RSI 4h;
+- ATR 15m;
+- ATR 1h;
+- ATR 4h;
+- ATR 1h в процентах от цены;
+- ATR 4h в процентах от цены;
+- Volume Ratio 1h.
+
+ATR нормализуется относительно текущей цены, поэтому монеты с разными номиналами можно сравнивать корректнее.
+
+## Derivatives
+
+Используются:
+
+- текущий funding rate;
+- средний funding из истории;
+- текущий OI;
+- изменение OI;
+- bid/ask spread.
+
+OI и funding API-ответы сортируются по времени. Это исправляет важную проблему старой версии: API может возвращать историю от новых значений к старым, поэтому вычисление изменения OI нельзя делать, предполагая фиксированный порядок.
+
+Bybit с 11 июня 2026 года использует односторонний метод отображения OI, поэтому абсолютные значения OI нельзя напрямую сравнивать со старыми данными до изменения методологии. Для этого скриннера важнее относительное изменение OI внутри одной серии. См. официальное объявление Bybit.
+
+## Order Book
+
+Добавлен публичный запрос `/v5/market/orderbook`.
+
+Скриннер получает верхние 50 уровней и считает:
+
+- bid notional;
+- ask notional;
+- imbalance в процентах;
+- количество полученных уровней.
+
+Формула imbalance:
+
+```text
+(bid_notional - ask_notional)
+-------------------------------- * 100
+(bid_notional + ask_notional)
 ```
 
-```bash
-go run ./cmd/screener -strategy long
+Это пока **не полноценный анализ стен и динамики стакана**. Это первый слой оценки ликвидности/перекоса. В будущем можно добавить расстояние до стен, кластеризацию, динамику imbalance и несколько зон глубины.
+
+## Выбор стратегии
+
+Меню находится в `cmd/screener/main.go`:
+
+```text
+1. Short Grid
+2. Short
+3. Long Grid
+4. Long
+5. Neutral Grid
 ```
+
+Стратегии также доступны через `--strategy`.
+
+Единый список имён находится в:
+
+```text
+internal/strategies/strategy.go
+```
+
+Функция `strategies.Names()` используется сервисом для расчёта всех стратегий. Поэтому новая стратегия не должна отдельно добавляться в несколько разных циклов.
+
+## Важный принцип JSON
+
+Даже если выбрана только одна стратегия, в каждом кандидате рассчитываются **все пять**:
+
+```json
+"strategies": {
+  "short-grid": { ... },
+  "short": { ... },
+  "long-grid": { ... },
+  "long": { ... },
+  "neutral-grid": { ... }
+}
+```
+
+Поле:
+
+```json
+"primary_strategy": "neutral-grid"
+```
+
+определяет только выбранный режим сортировки итоговых кандидатов.
+
+## Конфигурация
+
+Главные параметры:
+
+```json
+"filters": {
+  "max_price": 2.0,
+  "min_turnover_24h": 5000000,
+  "preselect_candidates": 60,
+  "top_candidates": 20
+}
+```
+
+`preselect_candidates` — сколько ликвидных монет проходит в глубокий анализ.
+
+`top_candidates` — сколько лучших монет попадает в итоговый JSON.
+
+Важно: `preselect_candidates >= top_candidates`.
+
+### Почему два параметра
+
+Если сразу анализировать только TOP-20 по росту, Neutral Grid теряет боковые монеты. Поэтому сначала берём более широкий ликвидный пул, а уже после свечей, OI, funding и стакана сортируем по конкретной стратегии.
+
+## Обработка ошибок
+
+HTTP API находится в `internal/bybit/client.go`.
+
+Там централизованы:
+
+- context cancellation;
+- HTTP timeout;
+- retries;
+- exponential-like linear retry delay;
+- проверка HTTP status;
+- проверка `retCode` Bybit;
+- JSON decoding.
+
+Запросы свечей/OI/funding/order book внутри одного кандидата выполняются параллельно.
+
+Количество одновременно анализируемых монет ограничивается `concurrency`.
+
+## Atomic JSON write
+
+`output.WriteJSON()` сначала пишет:
+
+```text
+screening.json.tmp
+```
+
+и только после успешной записи заменяет основной JSON.
+
+Это защищает существующий результат от частично записанного файла при падении процесса.
+
+## Тесты
+
+Запуск:
+
+```bash
+go test ./...
+```
+
+Тестами покрыты:
+
+- загрузка конфигурации;
+- список и создание всех стратегий;
+- диапазон Neutral Grid;
+- штраф Neutral Grid за сильный тренд;
+- отсутствие panic у стратегий на неполных данных;
+- сортировка Support/Resistance;
+- расчёт range/ATR;
+- RSI;
+- ATR;
+- Volume Ratio;
+- атомарная запись JSON.
+
+Проверка архива при подготовке: `gofmt`, `go test ./...`, `go vet ./...` и `go build ./cmd/screener` были успешно выполнены в среде с Go 1.23.2. Сам проект сохраняет требование `go 1.26.5`. В среде подготовки Go 1.26.5 не был доступен локально, а автоматическая загрузка toolchain была заблокирована сетью, поэтому именно бинарник Go 1.26.5 в этой среде запустить не удалось. Код не использует специфичных возможностей Go 1.26.5.
+
+Перед использованием рекомендуется также:
+
+```bash
+gofmt -w .
+go vet ./...
+go test ./...
+```
+
+## Безопасность API-ключей
+
+Текущий скриннер использует только публичные market endpoints и не требует API key/secret.
+
+Файл `.env` в репозиторий не включается. Используйте `.env.example` как шаблон для будущих приватных функций.
+
+## Что осталось развивать
+
+Следующие улучшения логично делать поверх текущей архитектуры:
+
+1. кластеризация близких pivot'ов в единые Support/Resistance зоны;
+2. сила уровня и количество тестов;
+3. RSI divergence;
+4. более точная структура HH/HL/LH/LL;
+5. OI + price relationship;
+6. история funding вместо только среднего;
+7. динамика order book imbalance;
+8. стены и расстояние до крупных liquidity clusters;
+9. ATR-normalized range detection на нескольких таймфреймах;
+10. backtesting scoring на исторических снимках;
+11. отдельные параметры scoring в конфигурации после накопления статистики.
+
+## Как восстановить контекст проекта
+
+Если в новой беседе нужно продолжить работу над проектом, достаточно сначала прочитать этот README.
+
+Ключевые файлы по задачам:
+
+- выбор стратегии: `cmd/screener/main.go`;
+- регистрация стратегий: `internal/strategies/strategy.go`;
+- scoring конкретной стратегии: `internal/strategies/*.go`;
+- pipeline и API orchestration: `internal/analysis/service.go`;
+- Bybit REST: `internal/bybit/*.go`;
+- индикаторы: `internal/indicators/indicators.go`;
+- pivots и уровни: `internal/structure/structure.go`;
+- JSON-модели: `models/market.go`;
+- конфигурация: `config/config.go` + `configs/config.json`;
+- запись JSON: `output/json.go`.
+
+Не нужно присылать весь проект для небольшого изменения. Сначала достаточно README и файлов из соответствующего раздела.
