@@ -2,63 +2,413 @@ package strategies
 
 import "universal-bybit-screener/models"
 
-// LongGrid ищет условия для Grid Bot с преимуществом нижней/восходящей стороны.
-// 15+15 за HH/HL — основной структурный bias; ATR и support получают следующий
-// вес, потому что без движения и рабочей нижней границы grid теряет смысл.
+// LongGrid ищет монеты, подходящие для Long Grid.
+//
+// Основная идея:
+//   - на 1h должна быть восходящая структура HH/HL;
+//   - 4h не должна находиться в подтверждённом нисходящем тренде;
+//   - диапазон должен быть достаточно широким относительно ATR;
+//   - цена должна находиться достаточно близко к поддержке;
+//   - желательно наличие положительного объёма и умеренного RSI;
+//   - сильный импульс вверх не должен автоматически считаться плюсом:
+//     для grid важнее стабильное движение, чем вертикальный памп.
+//
+// Стратегия специально стала консервативнее:
+// высокий score должен означать не просто "монета растёт",
+// а "монета действительно пригодна для Long Grid".
 type LongGrid struct{}
 
-func (LongGrid) Name() string { return "long-grid" }
-func (LongGrid) Evaluate(m models.MarketData, i models.Indicators, s map[string]models.Structure, l models.Levels) models.StrategyResult {
+func (LongGrid) Name() string {
+	return "long-grid"
+}
+
+func (LongGrid) Evaluate(
+	m models.MarketData,
+	i models.Indicators,
+	s map[string]models.Structure,
+	l models.Levels,
+) models.StrategyResult {
+
 	score := 0.0
-	st := s["1h"]
-	if st.HighState == "HH" {
+
+	st1h := s["1h"]
+	st4h := s["4h"]
+
+	// ------------------------------------------------------------
+	// 1. Структура 1h — главный фактор
+	// ------------------------------------------------------------
+
+	// Полноценная бычья структура HH + HL.
+	if st1h.HighState == "HH" {
 		score += 15
 	}
-	if st.LowState == "HL" {
+
+	if st1h.LowState == "HL" {
 		score += 15
 	}
-	if st.HighState == "LH" {
-		score -= 10
+
+	// Любой LL на 1h — серьёзный негатив для Long Grid.
+	if st1h.LowState == "LL" {
+		score -= 18
 	}
-	if st.LowState == "LL" {
+
+	// LH означает, что восходящая структура ломается.
+	if st1h.HighState == "LH" {
+		score -= 15
+	}
+
+	// ------------------------------------------------------------
+	// 2. Подтверждение старшим таймфреймом 4h
+	// ------------------------------------------------------------
+
+	// 4h HH + HL — хороший фон.
+	if st4h.HighState == "HH" {
+		score += 8
+	}
+
+	if st4h.LowState == "HL" {
+		score += 8
+	}
+
+	// 4h LH + LL — полноценный нисходящий тренд.
+	// В таком случае Long Grid не должна получать высокий score
+	// только за счёт хорошего 1h.
+	if st4h.HighState == "LH" {
 		score -= 12
 	}
-	if i.ATR1hPct >= 1.5 {
-		score += 10
-	} else if i.ATR1hPct >= 1 {
-		score += 5
+
+	if st4h.LowState == "LL" {
+		score -= 15
 	}
-	if l.NearestSupport > 0 {
-		dist := (m.Ticker.LastPrice - l.NearestSupport) / m.Ticker.LastPrice * 100
-		if dist >= 0 && dist <= 5 {
+
+	// Если 4h имеет одновременно LH + LL,
+	// это особенно плохой сценарий для Long Grid.
+	if st4h.HighState == "LH" && st4h.LowState == "LL" {
+		score -= 10
+	}
+
+	// ------------------------------------------------------------
+	// 3. ATR / волатильность
+	// ------------------------------------------------------------
+
+	// Для grid нужна нормальная рабочая волатильность.
+	//
+	// Старое правило:
+	//     ATR >= 1.5% -> +10
+	//
+	// было слишком либеральным: высокая ATR сама по себе
+	// ещё не делает монету хорошей для grid.
+	//
+	// Здесь умеренная волатильность получает небольшой плюс,
+	// слишком высокая — уже не награждается дополнительно.
+
+	if i.ATR1hPct >= 1.0 && i.ATR1hPct <= 3.0 {
+		score += 7
+	} else if i.ATR1hPct >= 0.7 && i.ATR1hPct < 1.0 {
+		score += 3
+	} else if i.ATR1hPct > 4.0 {
+		// Очень высокая волатильность повышает риск
+		// выхода из grid и резкого трендового движения.
+		score -= 5
+	}
+
+	// ------------------------------------------------------------
+	// 4. Ширина диапазона относительно ATR
+	// ------------------------------------------------------------
+
+	// Для grid важен не просто широкий процентный диапазон,
+	// а количество ATR, которое помещается в диапазон.
+	//
+	// Например:
+	// range = 2%
+	// ATR    = 1%
+	// range/ATR = 2
+	//
+	// Такой диапазон уже имеет смысл для сетки.
+	//
+	// Если range/ATR < 1, диапазон слишком узкий:
+	// обычное движение одной свечи может съесть большую часть grid.
+
+	if l.RangeToATR1h >= 2.0 {
+		score += 10
+	} else if l.RangeToATR1h >= 1.5 {
+		score += 6
+	} else if l.RangeToATR1h >= 1.0 {
+		score += 2
+	} else if l.RangeToATR1h > 0 {
+		score -= 8
+	}
+
+	// ------------------------------------------------------------
+	// 5. Близость к поддержке
+	// ------------------------------------------------------------
+
+	if l.NearestSupport > 0 && m.Ticker.LastPrice > 0 {
+		dist := (m.Ticker.LastPrice - l.NearestSupport) /
+			m.Ticker.LastPrice * 100
+
+		switch {
+		case dist >= 0 && dist <= 3:
+			// Цена практически у поддержки.
 			score += 12
-		} else if dist <= 10 {
-			score += 6
+
+		case dist <= 5:
+			score += 8
+
+		case dist <= 8:
+			score += 3
+
+		default:
+			// Цена далеко от поддержки.
+			// Для Long Grid это хуже: вход получается
+			// ближе к середине/верху диапазона.
+			score -= 4
 		}
 	}
-	if l.RangeWidthPct >= 5 {
+
+	// ------------------------------------------------------------
+	// 6. Положение цены внутри диапазона
+	// ------------------------------------------------------------
+
+	// Для Long Grid предпочтительнее нижняя часть диапазона.
+	//
+	// 0%   = возле поддержки
+	// 100%  = возле сопротивления
+
+	switch {
+	case l.RangePositionPct <= 30:
 		score += 8
-	}
-	if i.RSI1h >= 40 && i.RSI1h <= 65 {
-		score += 8
-	}
-	if m.Ticker.Price24hPcnt > 0 {
-		score += 5
-	}
-	if i.VolumeRatio1h > 1 {
-		score += 5
-	}
-	if i.VolumeTrend1h > 1.1 {
-		score += 2
-	}
-	if m.Ticker.FundingRate < 0 {
-		score += 3
-	}
-	if m.OrderBook.ImbalancePct > 10 {
+
+	case l.RangePositionPct <= 50:
 		score += 4
-	} else if m.OrderBook.ImbalancePct < -40 {
+
+	case l.RangePositionPct <= 70:
+		// Нейтральная зона.
+		score += 0
+
+	case l.RangePositionPct <= 85:
 		score -= 4
+
+	default:
+		// Цена почти у верхней границы.
+		// Покупать здесь для Long Grid уже поздновато.
+		score -= 8
 	}
+
+	// ------------------------------------------------------------
+	// 7. RSI 1h
+	// ------------------------------------------------------------
+
+	// Не хотим:
+	// - перепроданность в сильном нисходящем тренде;
+	// - перекупленность после вертикального роста.
+	//
+	// Лучший диапазон для Long Grid — умеренный RSI.
+
+	switch {
+	case i.RSI1h >= 45 && i.RSI1h <= 60:
+		score += 7
+
+	case i.RSI1h >= 40 && i.RSI1h < 45:
+		score += 3
+
+	case i.RSI1h > 60 && i.RSI1h <= 68:
+		score += 1
+
+	case i.RSI1h > 70:
+		score -= 8
+
+	case i.RSI1h < 35:
+		score -= 5
+	}
+
+	// ------------------------------------------------------------
+	// 8. 24h momentum
+	// ------------------------------------------------------------
+
+	// Сам по себе положительный 24h процент больше не является
+	// достаточной причиной для +5.
+	//
+	// Сильный памп для grid скорее опасен, чем полезен.
+
+	change24h := m.Ticker.Price24hPcnt
+
+	switch {
+	case change24h >= 0 && change24h <= 5:
+		score += 3
+
+	case change24h > 5 && change24h <= 10:
+		score += 1
+
+	case change24h > 10:
+		// Сильный импульс вверх.
+		// Для Long Grid это уже скорее риск.
+		score -= 5
+
+	case change24h < -10:
+		// Сильное падение.
+		score -= 5
+	}
+
+	// ------------------------------------------------------------
+	// 9. Объём
+	// ------------------------------------------------------------
+
+	// Нам нужен живой рынок, но не экстремальный всплеск объёма.
+
+	if i.VolumeRatio1h >= 1.0 && i.VolumeRatio1h <= 3.0 {
+		score += 5
+	} else if i.VolumeRatio1h > 3.0 {
+		// Резкий всплеск объёма часто означает импульс,
+		// а не спокойный grid market.
+		score += 1
+	}
+
+	if i.VolumeTrend1h >= 1.1 && i.VolumeTrend1h <= 2.0 {
+		score += 2
+	} else if i.VolumeTrend1h > 3.0 {
+		score -= 2
+	}
+
+	// ------------------------------------------------------------
+	// 10. Funding
+	// ------------------------------------------------------------
+
+	// Небольшой отрицательный funding может быть плюсом:
+	// шортисты платят лонгам.
+	//
+	// Но экстремально отрицательный funding может означать
+	// сильный перекос рынка и риск squeeze.
+
+	funding := m.Ticker.FundingRate
+
+	switch {
+	case funding < 0 && funding >= -0.0002:
+		score += 3
+
+	case funding < -0.0002:
+		score += 1
+
+	case funding > 0.0005:
+		// Сильно положительный funding — лонги перегружены.
+		score -= 3
+	}
+
+	// ------------------------------------------------------------
+	// 11. Open Interest
+	// ------------------------------------------------------------
+
+	// В MarketData нет m.Derivatives.
+	//
+	// История OI находится в:
+	//     m.OpenInterest []models.OpenInterestPoint
+	//
+	// Поэтому изменение OI считаем непосредственно здесь.
+
+	oiChange := openInterestChangeLG(m)
+
+	switch {
+	case oiChange >= -3 && oiChange <= 5:
+		// OI относительно стабилен.
+		// Для grid это хороший сценарий.
+		score += 3
+
+	case oiChange > 5 && oiChange <= 15:
+		// Рост OI допустим, но уже повышает риск трендового движения.
+		score += 1
+
+	case oiChange > 15:
+		// Резкий рост OI — возможное накопление позиций
+		// и последующий сильный импульс.
+		score -= 5
+
+	case oiChange < -15:
+		// Сильное сокращение OI обычно говорит о массовом
+		// закрытии позиций.
+		score -= 2
+	}
+
+	// ------------------------------------------------------------
+	// 12. Order Book
+	// ------------------------------------------------------------
+
+	// Для Long Grid небольшой перевес bid полезен,
+	// но стакан не должен становиться главным фактором.
+
+	if m.OrderBook.ImbalancePct >= 10 &&
+		m.OrderBook.ImbalancePct <= 30 {
+		score += 3
+	} else if m.OrderBook.ImbalancePct > 30 {
+		// Слишком сильный перекос может быть временным.
+		score += 1
+	} else if m.OrderBook.ImbalancePct < -20 {
+		score -= 3
+	}
+
+	// ------------------------------------------------------------
+	// 13. Жёсткие veto-условия
+	// ------------------------------------------------------------
+
+	// Эти условия не должны просто уменьшать score.
+	// Они говорят: "это вообще не тот тип рынка".
+
+	// Сильный 4h downtrend.
+	if st4h.HighState == "LH" && st4h.LowState == "LL" {
+		score = getmin(score, 35)
+	}
+
+	// 1h downtrend.
+	if st1h.HighState == "LH" && st1h.LowState == "LL" {
+		score = getmin(score, 30)
+	}
+
+	// Диапазон меньше одной ATR.
+	// Для grid это практически бесполезная конструкция.
+	if l.RangeToATR1h > 0 && l.RangeToATR1h < 1.0 {
+		score = getmin(score, 40)
+	}
+
+	// Сильный вертикальный памп + перекупленность.
+	if change24h > 15 && i.RSI1h > 65 {
+		score = getmin(score, 45)
+	}
+
 	score = clamp(score)
-	return models.StrategyResult{Score: score, Status: status(score), Reason: "trend + volatility + support + grid range"}
+
+	return models.StrategyResult{
+		Score:  score,
+		Status: status(score),
+		Reason: "trend + volatility + support + grid range",
+	}
+}
+
+// openInterestChange возвращает изменение OI в процентах
+// между последней и первой точкой доступной истории.
+//
+// Например:
+// OI было 100
+// OI стало 110
+// результат = +10%
+func openInterestChangeLG(m models.MarketData) float64 {
+	if len(m.OpenInterest) < 2 {
+		return 0
+	}
+
+	first := m.OpenInterest[0].OpenInterest
+	last := m.OpenInterest[len(m.OpenInterest)-1].OpenInterest
+
+	if first <= 0 {
+		return 0
+	}
+
+	return (last - first) / first * 100
+}
+
+// getmin возвращает меньшее из двух значений.
+func getmin(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+
+	return b
 }
