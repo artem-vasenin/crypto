@@ -3,6 +3,8 @@ package strategies
 import "universal-bybit-screener/models"
 
 // Short оценивает обычную направленную Short-позицию.
+// Структура получает максимальные веса: LH/LL на 1h важнее старшего TF, RSI/объём/funding
+// лишь подтверждают сигнал. Противоположная HH/HL-структура получает крупный штраф.
 type Short struct{}
 
 func (Short) Name() string { return "short" }

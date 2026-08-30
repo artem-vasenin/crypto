@@ -3,6 +3,8 @@ package strategies
 import "universal-bybit-screener/models"
 
 // LongGrid ищет условия для Grid Bot с преимуществом нижней/восходящей стороны.
+// 15+15 за HH/HL — основной структурный bias; ATR и support получают следующий
+// вес, потому что без движения и рабочей нижней границы grid теряет смысл.
 type LongGrid struct{}
 
 func (LongGrid) Name() string { return "long-grid" }

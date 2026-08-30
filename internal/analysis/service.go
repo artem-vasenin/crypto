@@ -94,7 +94,13 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	if len(results) > s.cfg.Filters.TopCandidates {
 		results = results[:s.cfg.Filters.TopCandidates]
 	}
-	return models.ScreeningResult{GeneratedAt: time.Now().UTC(), Strategy: s.strategy.Name(), Filters: s.cfg.Filters, Candidates: results}, nil
+	return models.ScreeningResult{
+		GeneratedAt: time.Now().UTC(),
+		Strategy:    s.strategy.Name(),
+		Prompt:      BuildAIPrompt(s.strategy.Name()),
+		Filters:     s.cfg.Filters,
+		Candidates:  results,
+	}, nil
 }
 
 func isGridStrategy(name string) bool {
@@ -234,4 +240,23 @@ func changeN(c []models.Candle, n int) float64 {
 		return 0
 	}
 	return (c[len(c)-1].Close/c[start].Close - 1) * 100
+}
+
+// BuildAIPrompt формирует единый prompt для последующего анализа JSON внешней ИИ-моделью.
+// Prompt не пытается заменить scoring: ИИ должен перепроверить исходные метрики,
+// найти противоречия и только после этого сделать вывод по кандидатам.
+func BuildAIPrompt(strategy string) string {
+	return fmt.Sprintf(`Ты — криптоаналитик. Проанализируй JSON-скрининг Bybit для стратегии "%s".
+
+Задача:
+1. Оцени кандидатов не только по score, но и по исходным данным.
+2. Проверь структуру 15m/1h/4h, ближайшие support/resistance и положение цены в диапазоне.
+3. Учти RSI, ATR, объём, funding, Open Interest и стакан.
+4. Найди противоречия между метриками и случаи, где score может быть обманчив.
+5. Для лучших кандидатов опиши основной сценарий и сценарий слома.
+6. Для Grid отдельно оцени ширину диапазона, ATR, положение цены, ликвидность и риск выхода из диапазона.
+7. Не придумывай данные, которых нет в JSON.
+8. В финале дай shortlist лучших кандидатов и объясни, почему они лучше остальных.
+
+Score — эвристический рейтинг скриннера, а не вероятность прибыли и не гарантия сделки.`, strategy)
 }

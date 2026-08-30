@@ -3,6 +3,8 @@ package strategies
 import "universal-bybit-screener/models"
 
 // ShortGrid ищет импульс вверх, который замедляется возле сопротивления.
+// Веса отражают приоритет признаков: структура/сопротивление/волатильность важнее
+// вторичных подтверждений, а сильный HH+HL получает крупный штраф как главный риск.
 type ShortGrid struct{}
 
 func (ShortGrid) Name() string { return "short-grid" }

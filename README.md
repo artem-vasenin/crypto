@@ -29,9 +29,17 @@ go run ./cmd/screener
 
 ```bash
 go run ./cmd/screener --strategy short-grid
+```
+```bash
 go run ./cmd/screener --strategy short
+```
+```bash
 go run ./cmd/screener --strategy long-grid
+```
+```bash
 go run ./cmd/screener --strategy long
+```
+```bash
 go run ./cmd/screener --strategy neutral-grid
 ```
 

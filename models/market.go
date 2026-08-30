@@ -147,8 +147,11 @@ type Candidate struct {
 }
 
 type ScreeningResult struct {
-	GeneratedAt time.Time   `json:"generated_at"`
-	Strategy    string      `json:"primary_strategy"`
-	Filters     any         `json:"filters"`
-	Candidates  []Candidate `json:"candidates"`
+	GeneratedAt time.Time `json:"generated_at"`
+	Strategy    string    `json:"primary_strategy"`
+	// Prompt хранит готовую инструкцию для ИИ прямо внутри JSON.
+	// Благодаря этому результат скриннинга самодостаточен: данные и задача для модели идут вместе.
+	Prompt     string      `json:"prompt"`
+	Filters    any         `json:"filters"`
+	Candidates []Candidate `json:"candidates"`
 }

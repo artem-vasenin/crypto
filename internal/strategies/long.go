@@ -3,6 +3,8 @@ package strategies
 import "universal-bybit-screener/models"
 
 // Long оценивает обычную направленную Long-позицию, а не Grid Bot.
+// HH/HL — основа оценки (20+20 на 1h), 4h подтверждает контекст, а RSI/объём/funding
+// имеют меньшие веса, чтобы единичный индикатор не переопределял структуру рынка.
 type Long struct{}
 
 func (Long) Name() string { return "long" }
