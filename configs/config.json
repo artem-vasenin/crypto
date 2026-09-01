@@ -3,11 +3,11 @@
     "base_url": "https://api.bybit.com"
   },
   "filters": {
-    "max_price": 2.0,
-    "min_turnover_24h": 5000000.0,
+    "max_price": 50.0,
+    "min_turnover_24h": 100000.0,
     "preselect_candidates": 60,
     "top_candidates": 20,
-    "max_grid_spread_pct": 0.15
+    "max_grid_spread_pct": 0.5
   },
   "analysis": {
     "kline_limit_15m": 300,
@@ -21,7 +21,7 @@
     "testnet": true,
     "max_leverage": 3,
     "margin_per_trade_usd": 15.0,
-    "min_score": 75.0,
+    "min_score": 40.0,
     "trailing_pct": 1.5,
     "check_interval": "1m"
   },

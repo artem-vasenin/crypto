@@ -5,3 +5,7 @@
 .env.tmp
 configs/config.test.json
 configs/config.prod.json
+configs/config---prod.json
+long-screening.json
+short-screening.json
+bot

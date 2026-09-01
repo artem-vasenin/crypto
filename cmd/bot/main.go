@@ -8,12 +8,15 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"universal-bybit-screener/config"
 	"universal-bybit-screener/internal/execution"
 	"universal-bybit-screener/models"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
@@ -23,6 +26,11 @@ func main() {
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
+
+	if err := godotenv.Load(); err != nil {
+		log.Println("[INFO] .env file not found, falling back to system environment variables")
+	}
+
 	log.Println("[INFO] Initializing Execution Engine Service...")
 
 	cfg, err := config.Load(*configPath)
@@ -30,7 +38,6 @@ func main() {
 		log.Fatalf("[FATAL] Configuration load failed: %v", err)
 	}
 
-	// Чтение приватных ключей из переменных окружения (безопасность)
 	apiKey := os.Getenv("BYBIT_API_KEY")
 	apiSecret := os.Getenv("BYBIT_API_SECRET")
 
@@ -56,27 +63,35 @@ func main() {
 
 	engine := execution.NewEngine(botCfg)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 
-	log.Printf("[INFO] Engine Started. Target Strategy: %s | Margin: $%.2f | Leverage: x%d | Testnet: %v",
+	log.Printf("[INFO] Engine Active. Target Strategy: %s | Margin: $%.2f | Leverage: x%d | Testnet: %v",
 		*strategyName, botCfg.MarginPerTradeUSD, botCfg.MaxLeverage, botCfg.Testnet)
 
 	ticker := time.NewTicker(botCfg.CheckInterval)
 	defer ticker.Stop()
 
+	processIteration(ctx, engine, *inputFile, *strategyName, cfg.Concurrency)
+
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[INFO] Graceful Shutdown. Terminating Execution Engine...")
+			log.Println("[INFO] Interrupt signal received. Closing network connections and shutting down...")
 			return
 		case <-ticker.C:
-			processIteration(ctx, engine, *inputFile, *strategyName)
+			processIteration(ctx, engine, *inputFile, *strategyName, cfg.Concurrency)
 		}
 	}
 }
 
-func processIteration(ctx context.Context, engine *execution.Engine, filePath, targetStrategy string) {
+func processIteration(ctx context.Context, engine *execution.Engine, filePath, targetStrategy string, concurrency int) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	engine.LogActivePositions(ctx)
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Printf("[WARN] Failed to read screening JSON file %s: %v", filePath, err)
@@ -89,16 +104,43 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 		return
 	}
 
-	log.Printf("[ENGINE] Processing screening snapshot generated at %s. Candidates count: %d",
+	log.Printf("[ENGINE] Processing snapshot generated at %s. Candidates: %d",
 		result.GeneratedAt.Format(time.RFC3339), len(result.Candidates))
 
-	for _, cand := range result.Candidates {
-		// Обновление трейлинга активных позиций
-		engine.UpdateTrailingStops(ctx, cand.Symbol, cand.Market.Price)
-
-		// Оценка кандидата на открытие ордера
-		if err := engine.ProcessCandidate(ctx, cand, targetStrategy); err != nil {
-			log.Printf("[ERROR] Failed to process candidate %s: %v", cand.Symbol, err)
-		}
+	if concurrency <= 0 {
+		concurrency = 5
 	}
+
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for _, cand := range result.Candidates {
+		if ctx.Err() != nil {
+			break
+		}
+
+		cand := cand
+		wg.Add(1)
+
+		go func(c models.Candidate) {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			engine.UpdateTrailingStops(ctx, c.Symbol, c.Market.Price)
+
+			if err := engine.ProcessCandidate(ctx, c, targetStrategy); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("[ERROR] Failed to process candidate %s: %v", c.Symbol, err)
+				}
+			}
+		}(cand)
+	}
+
+	wg.Wait()
 }

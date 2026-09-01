@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -20,11 +21,13 @@ import (
 )
 
 type Engine struct {
-	cfg       models.BotConfig
-	client    *http.Client
-	baseURL   string
-	mu        sync.Mutex
-	positions map[string]*models.PositionState
+	cfg            models.BotConfig
+	client         *http.Client
+	baseURL        string
+	mu             sync.Mutex
+	positions      map[string]*models.PositionState
+	cooldowns      map[string]time.Time
+	disabledTokens map[string]bool
 }
 
 func NewEngine(cfg models.BotConfig) *Engine {
@@ -33,19 +36,33 @@ func NewEngine(cfg models.BotConfig) *Engine {
 		baseURL = "https://api-testnet.bybit.com"
 	}
 	return &Engine{
-		cfg:       cfg,
-		client:    &http.Client{Timeout: 10 * time.Second},
-		baseURL:   baseURL,
-		positions: make(map[string]*models.PositionState),
+		cfg:            cfg,
+		client:         &http.Client{Timeout: 10 * time.Second},
+		baseURL:        baseURL,
+		positions:      make(map[string]*models.PositionState),
+		cooldowns:      make(map[string]time.Time),
+		disabledTokens: make(map[string]bool),
 	}
 }
 
-// ProcessCandidate анализирует кандидатов и исполняет вход при превышении MinScore
 func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
 	e.mu.Lock()
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
 		return nil
+	}
+
+	if e.disabledTokens[c.Symbol] {
+		e.mu.Unlock()
+		return nil
+	}
+
+	if until, inCooldown := e.cooldowns[c.Symbol]; inCooldown {
+		if time.Now().Before(until) {
+			e.mu.Unlock()
+			return nil
+		}
+		delete(e.cooldowns, c.Symbol)
 	}
 	e.mu.Unlock()
 
@@ -63,58 +80,100 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	log.Printf("[EXECUTION] Signal accepted for %s | Strategy: %s | Score: %.2f | Side: %s",
-		c.Symbol, targetStrategy, res.Score, side)
-
-	// 1. Установка изолированного плеча
-	if err := e.setLeverage(ctx, c.Symbol, e.cfg.MaxLeverage); err != nil {
-		log.Printf("[WARN] Failed to set leverage for %s: %v", c.Symbol, err)
+	// 1. Получение актуальной цены и спецификаций
+	currentPrice, err := e.getCurrentPrice(ctx, c.Symbol)
+	if err != nil {
+		return fmt.Errorf("failed to fetch live price for %s: %w", c.Symbol, err)
 	}
 
-	// 2. Расчет точности объема ордера
-	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, c.Market.Price, 0.001)
+	qtyStep, minQty, tickSize, minNotional, err := e.getInstrumentLimits(ctx, c.Symbol)
+	if err != nil {
+		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
+	}
+
+	// 2. Расчет объема позиции
+	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, currentPrice, qtyStep, minQty)
 	if qty <= 0 {
-		return fmt.Errorf("calculated qty is too low for symbol %s", c.Symbol)
+		return fmt.Errorf("calculated qty (0) is below minQty (%.4f) for %s", minQty, c.Symbol)
 	}
 
-	// 3. Вычисление Stop Loss
+	notional := qty * currentPrice
+	if minNotional > 0 && notional < minNotional {
+		return fmt.Errorf("notional value %.2f USD is below minimum required %.2f USD for %s", notional, minNotional, c.Symbol)
+	}
+
+	// 3. Установка маржинального режима (Isolated) и плеча
+	_ = e.setTradeModeIsolated(ctx, c.Symbol)
+	if err := e.setLeverage(ctx, c.Symbol, e.cfg.MaxLeverage); err != nil {
+		log.Printf("[WARN] Set leverage for %s: %v", c.Symbol, err)
+	}
+
+	// 4. Расчет Stop Loss с защитой от некорректных внешних уровней
+	trailingDist := currentPrice * (e.cfg.TrailingPct / 100.0)
 	slPrice := 0.0
+
 	if side == "Buy" {
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < c.Market.Price {
+		slPrice = currentPrice - trailingDist
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > slPrice {
 			slPrice = c.Levels.NearestSupport
-		} else {
-			slPrice = c.Market.Price * (1 - (e.cfg.TrailingPct / 100))
 		}
 	} else {
-		if c.Levels.NearestResistance > 0 && c.Levels.NearestResistance > c.Market.Price {
+		slPrice = currentPrice + trailingDist
+		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < slPrice {
 			slPrice = c.Levels.NearestResistance
-		} else {
-			slPrice = c.Market.Price * (1 + (e.cfg.TrailingPct / 100))
 		}
 	}
+	slPrice = RoundToStep(slPrice, tickSize)
 
-	if !ValidateStopLoss(side, c.Market.Price, slPrice, 0.2) {
-		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, c.Market.Price, slPrice)
+	if !ValidateStopLoss(side, currentPrice, slPrice, 0.2) {
+		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
-	// 4. Отправка рыночного ордера с привязанным Stop-Loss
-	orderID, err := e.placeMarketOrder(ctx, c.Symbol, side, qty, slPrice)
+	// 5. Расчет Take Profit с абсолютной математической гарантией (R:R = 1:2)
+	riskDist := math.Abs(currentPrice - slPrice)
+	tpPrice := 0.0
+
+	if side == "Buy" {
+		tpPrice = currentPrice + (riskDist * 2.0)
+		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < tpPrice {
+			tpPrice = c.Levels.NearestResistance
+		}
+		if tpPrice <= currentPrice {
+			tpPrice = currentPrice + (riskDist * 2.0)
+		}
+	} else {
+		tpPrice = currentPrice - (riskDist * 2.0)
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > tpPrice {
+			tpPrice = c.Levels.NearestSupport
+		}
+		if tpPrice >= currentPrice || tpPrice <= 0 {
+			tpPrice = currentPrice - (riskDist * 2.0)
+		}
+	}
+	tpPrice = RoundToStep(tpPrice, tickSize)
+
+	if !ValidateTakeProfit(side, currentPrice, tpPrice, 0.2) {
+		return fmt.Errorf("take profit validation failed for %s (entry: %.4f, tp: %.4f)", c.Symbol, currentPrice, tpPrice)
+	}
+
+	// 6. Выполнение ордера
+	orderID, err := e.placeMarketOrder(ctx, c.Symbol, side, qty, qtyStep, slPrice, tpPrice, tickSize)
 	if err != nil {
 		return fmt.Errorf("order execution failed for %s: %w", c.Symbol, err)
 	}
 
-	log.Printf("[SUCCESS] Position opened: %s %s | Qty: %.4f | SL: %.4f | OrderID: %s",
-		c.Symbol, side, qty, slPrice, orderID)
+	log.Printf("[SUCCESS] Position opened: %s %s | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
+		c.Symbol, side, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
 
 	e.mu.Lock()
 	e.positions[c.Symbol] = &models.PositionState{
 		Symbol:       c.Symbol,
 		Side:         side,
-		EntryPrice:   c.Market.Price,
+		EntryPrice:   currentPrice,
 		Size:         qty,
 		StopLoss:     slPrice,
-		HighestPrice: c.Market.Price,
-		LowestPrice:  c.Market.Price,
+		HighestPrice: currentPrice,
+		LowestPrice:  currentPrice,
 		OpenedAt:     time.Now().UTC(),
 	}
 	e.mu.Unlock()
@@ -122,7 +181,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	return nil
 }
 
-// UpdateTrailingStops выполняет динамическое подтягивание Stop-Loss
 func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, currentPrice float64) {
 	e.mu.Lock()
 	pos, active := e.positions[symbol]
@@ -130,6 +188,19 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 		e.mu.Unlock()
 		return
 	}
+	e.mu.Unlock()
+
+	if !e.hasActivePosition(ctx, symbol) {
+		log.Printf("[CLEANUP] Position %s closed on exchange. Activating 15m Cooldown.", symbol)
+		e.mu.Lock()
+		delete(e.positions, symbol)
+		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
+		e.mu.Unlock()
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	updatedSL := 0.0
 	shouldUpdate := false
@@ -155,7 +226,6 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 			}
 		}
 	}
-	e.mu.Unlock()
 
 	if shouldUpdate {
 		log.Printf("[TRAILING] Updating Trailing Stop for %s -> New SL: %.4f", symbol, updatedSL)
@@ -163,6 +233,212 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 			log.Printf("[ERROR] Failed to update SL on exchange for %s: %v", symbol, err)
 		}
 	}
+}
+
+func (e *Engine) LogActivePositions(ctx context.Context) {
+	reqURL := fmt.Sprintf("%s/v5/position/list?category=linear&settleCoin=USDT", e.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return
+	}
+
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	recvWindow := "5000"
+	rawSignature := timestamp + e.cfg.ApiKey + recvWindow
+
+	h := hmac.New(sha256.New, []byte(e.cfg.ApiSecret))
+	h.Write([]byte(rawSignature))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	req.Header.Set("X-BAPI-API-KEY", e.cfg.ApiKey)
+	req.Header.Set("X-BAPI-SIGN", signature)
+	req.Header.Set("X-BAPI-TIMESTAMP", timestamp)
+	req.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+
+	var res struct {
+		Result struct {
+			List []struct {
+				Symbol        string `json:"symbol"`
+				Side          string `json:"side"`
+				Size          string `json:"size"`
+				AvgPrice      string `json:"avgPrice"`
+				UnrealisedPnl string `json:"unrealisedPnl"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &res); err != nil {
+		return
+	}
+
+	activeCount := 0
+	totalUnrealizedPnL := 0.0
+
+	for _, pos := range res.Result.List {
+		size, _ := strconv.ParseFloat(pos.Size, 64)
+		if size > 0 {
+			activeCount++
+			pnl, _ := strconv.ParseFloat(pos.UnrealisedPnl, 64)
+			totalUnrealizedPnL += pnl
+			log.Printf("[POS MONITOR] %s %s | Size: %s | Entry: %s | uPnL: %.4f USDT",
+				pos.Symbol, pos.Side, pos.Size, pos.AvgPrice, pnl)
+		}
+	}
+
+	if activeCount > 0 {
+		log.Printf("[SUMMARY] Active Positions: %d | Total uPnL: %.4f USDT", activeCount, totalUnrealizedPnL)
+	}
+}
+
+func (e *Engine) getCurrentPrice(ctx context.Context, symbol string) (float64, error) {
+	reqURL := fmt.Sprintf("%s/v5/market/tickers?category=linear&symbol=%s", e.baseURL, symbol)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+
+	var res struct {
+		RetCode int `json:"retCode"`
+		Result  struct {
+			List []struct {
+				LastPrice string `json:"lastPrice"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
+		return 0, fmt.Errorf("failed to parse ticker response for %s", symbol)
+	}
+
+	return strconv.ParseFloat(res.Result.List[0].LastPrice, 64)
+}
+
+func (e *Engine) hasActivePosition(ctx context.Context, symbol string) bool {
+	reqURL := fmt.Sprintf("%s/v5/position/list?category=linear&symbol=%s", e.baseURL, symbol)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false
+	}
+
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	recvWindow := "5000"
+	rawSignature := timestamp + e.cfg.ApiKey + recvWindow
+
+	h := hmac.New(sha256.New, []byte(e.cfg.ApiSecret))
+	h.Write([]byte(rawSignature))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	req.Header.Set("X-BAPI-API-KEY", e.cfg.ApiKey)
+	req.Header.Set("X-BAPI-SIGN", signature)
+	req.Header.Set("X-BAPI-TIMESTAMP", timestamp)
+	req.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+
+	var res struct {
+		Result struct {
+			List []struct {
+				Size string `json:"size"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
+		return false
+	}
+
+	size, _ := strconv.ParseFloat(res.Result.List[0].Size, 64)
+	return size > 0
+}
+
+func (e *Engine) getInstrumentLimits(ctx context.Context, symbol string) (qtyStep, minQty, tickSize, minNotional float64, err error) {
+	reqURL := fmt.Sprintf("%s/v5/market/instruments-info?category=linear&symbol=%s", e.baseURL, symbol)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	var res struct {
+		RetCode int `json:"retCode"`
+		Result  struct {
+			List []struct {
+				PriceFilter struct {
+					TickSize string `json:"tickSize"`
+				} `json:"priceFilter"`
+				LotSizeFilter struct {
+					QtyStep          string `json:"qtyStep"`
+					MinOrderQty      string `json:"minOrderQty"`
+					MinNotionalValue string `json:"minNotionalValue"`
+				} `json:"lotSizeFilter"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
+		return 0, 0, 0, 0, fmt.Errorf("symbol info not found or unmarshal error: %w", err)
+	}
+
+	item := res.Result.List[0]
+	qtyStep, _ = strconv.ParseFloat(item.LotSizeFilter.QtyStep, 64)
+	minQty, _ = strconv.ParseFloat(item.LotSizeFilter.MinOrderQty, 64)
+	tickSize, _ = strconv.ParseFloat(item.PriceFilter.TickSize, 64)
+	minNotional, _ = strconv.ParseFloat(item.LotSizeFilter.MinNotionalValue, 64)
+
+	return qtyStep, minQty, tickSize, minNotional, nil
+}
+
+func (e *Engine) setTradeModeIsolated(ctx context.Context, symbol string) error {
+	params := map[string]interface{}{
+		"category":     "linear",
+		"symbol":       symbol,
+		"tradeMode":    1,
+		"buyLeverage":  strconv.Itoa(e.cfg.MaxLeverage),
+		"sellLeverage": strconv.Itoa(e.cfg.MaxLeverage),
+	}
+	_, err := e.doSignedPOST(ctx, "/v5/position/switch-isolated", params, symbol)
+	return err
 }
 
 func (e *Engine) setLeverage(ctx context.Context, symbol string, leverage int) error {
@@ -173,21 +449,24 @@ func (e *Engine) setLeverage(ctx context.Context, symbol string, leverage int) e
 		"buyLeverage":  levStr,
 		"sellLeverage": levStr,
 	}
-	_, err := e.doSignedPOST(ctx, "/v5/position/set-leverage", params)
+	_, err := e.doSignedPOST(ctx, "/v5/position/set-leverage", params, symbol)
 	return err
 }
 
-func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty, sl float64) (string, error) {
+func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty, qtyStep, sl, tp, tickSize float64) (string, error) {
 	params := map[string]interface{}{
 		"category":    "linear",
 		"symbol":      symbol,
 		"side":        side,
 		"orderType":   "Market",
-		"qty":         strconv.FormatFloat(qty, 'f', 4, 64),
+		"qty":         FormatStep(qty, qtyStep),
 		"timeInForce": "GTC",
-		"stopLoss":    strconv.FormatFloat(sl, 'f', 4, 64),
+		"stopLoss":    FormatStep(sl, tickSize),
+		"takeProfit":  FormatStep(tp, tickSize),
+		"slTriggerBy": "LastPrice",
+		"tpTriggerBy": "LastPrice",
 	}
-	resp, err := e.doSignedPOST(ctx, "/v5/order/create", params)
+	resp, err := e.doSignedPOST(ctx, "/v5/order/create", params, symbol)
 	if err != nil {
 		return "", err
 	}
@@ -210,11 +489,11 @@ func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl flo
 		"stopLoss":    strconv.FormatFloat(sl, 'f', 4, 64),
 		"positionIdx": 0,
 	}
-	_, err := e.doSignedPOST(ctx, "/v5/position/trading-stop", params)
+	_, err := e.doSignedPOST(ctx, "/v5/position/trading-stop", params, symbol)
 	return err
 }
 
-func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[string]interface{}) ([]byte, error) {
+func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[string]interface{}, symbol string) ([]byte, error) {
 	jsonBody, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -228,7 +507,6 @@ func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[stri
 	h.Write([]byte(rawSignature))
 	signature := hex.EncodeToString(h.Sum(nil))
 
-	// ИСПРАВЛЕНИЕ: Передача массива байт через bytes.NewReader для безопасного формирования HTTP Body
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+path, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, err
@@ -259,7 +537,14 @@ func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[stri
 		return nil, err
 	}
 
-	if apiRes.RetCode != 0 && apiRes.RetCode != 110043 {
+	if apiRes.RetCode == 110126 {
+		e.mu.Lock()
+		e.disabledTokens[symbol] = true
+		e.mu.Unlock()
+		log.Printf("[BLACKLIST] Token %s disabled due to missing user agreement (code 110126)", symbol)
+	}
+
+	if apiRes.RetCode != 0 && apiRes.RetCode != 110043 && apiRes.RetCode != 110026 {
 		return nil, fmt.Errorf("bybit api error code=%d: %s", apiRes.RetCode, apiRes.RetMsg)
 	}
 
