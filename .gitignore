@@ -1,1 +1,7 @@
 .idea
+.env.test
+.env
+.env.prod
+.env.tmp
+configs/config.test.json
+configs/config.prod.json
