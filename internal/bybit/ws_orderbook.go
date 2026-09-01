@@ -16,8 +16,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const defaultWsURL = "wss://stream-testnet.bybit.com/v5/public/linear"
-const defaultWsURLProd = "wss://stream.bybit.com/v5/public/linear"
+// const defaultWsURLTest = "wss://stream-testnet.bybit.com/v5/public/linear"
+const defaultWsURL = "wss://stream.bybit.com/v5/public/linear"
 
 // LocalOrderBook хранит L2-книгу ордеров конкретной монеты в памяти
 type LocalOrderBook struct {

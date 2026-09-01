@@ -8,17 +8,24 @@ import (
 	"strings"
 )
 
-// CalculatePositionQty считает количество контрактов кратно qtyStep и не меньше minQty
-func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQty float64) float64 {
+// CalculatePositionQty рассчитывает точный объем позиции с гарантийным покрытием MinNotional Bybit
+func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQty, minNotional float64) float64 {
 	if price <= 0 || leverage <= 0 || marginUSD <= 0 || qtyStep <= 0 {
 		return 0
 	}
 
 	notionalUSD := marginUSD * float64(leverage)
+
+	// Если ноционал ниже требований биржи (например $10), увеличиваем его до $10.5
+	targetMinNotional := math.Max(minNotional, 10.5)
+	if notionalUSD < targetMinNotional {
+		notionalUSD = targetMinNotional
+	}
+
 	rawQty := notionalUSD / price
 
 	if rawQty < minQty {
-		return 0
+		rawQty = minQty
 	}
 
 	steps := math.Floor(rawQty / qtyStep)
@@ -35,7 +42,7 @@ func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQt
 	return qty
 }
 
-// RoundToStep округляет ценовое значение строго кратно step
+// RoundToStep округляет ценовое значение строго кратно step без плавающей погрешности
 func RoundToStep(val, step float64) float64 {
 	if step <= 0 || val <= 0 {
 		return val
@@ -68,7 +75,7 @@ func FormatStep(val, step float64) string {
 	return strconv.FormatFloat(val, 'f', precision, 64)
 }
 
-// ValidateStopLoss проверяет физическую корректность и минимальный зазор SL (от 1.5% до 15%)
+// ValidateStopLoss проверяет физическую корректность и границы SL
 func ValidateStopLoss(side string, entryPrice, slPrice, minDistancePct float64) bool {
 	if slPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -87,10 +94,10 @@ func ValidateStopLoss(side string, entryPrice, slPrice, minDistancePct float64) 
 		distPct = (slPrice - entryPrice) / entryPrice * 100
 	}
 
-	return distPct >= minDistancePct && distPct <= 15.0
+	return distPct >= minDistancePct && distPct <= 10.0
 }
 
-// ValidateTakeProfit проверяет физическую корректность TP
+// ValidateTakeProfit проверяет физическую корректность и границы TP
 func ValidateTakeProfit(side string, entryPrice, tpPrice, minDistancePct float64) bool {
 	if tpPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -109,5 +116,5 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minDistancePct float64
 		distPct = (entryPrice - tpPrice) / entryPrice * 100
 	}
 
-	return distPct >= minDistancePct && distPct <= 30.0
+	return distPct >= minDistancePct && distPct <= 20.0
 }

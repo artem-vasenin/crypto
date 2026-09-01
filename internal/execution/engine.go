@@ -21,13 +21,17 @@ import (
 )
 
 type Engine struct {
-	cfg            models.BotConfig
-	client         *http.Client
-	baseURL        string
-	mu             sync.Mutex
-	positions      map[string]*models.PositionState
-	cooldowns      map[string]time.Time
-	disabledTokens map[string]bool
+	cfg               models.BotConfig
+	client            *http.Client
+	baseURL           string
+	mu                sync.Mutex
+	positions         map[string]*models.PositionState
+	cooldowns         map[string]time.Time
+	disabledTokens    map[string]bool
+	maxTotalMarginUSD float64
+	cachedBalance     float64
+	lastBalanceCheck  time.Time
+	wsEngine          *WSEngine
 }
 
 func NewEngine(cfg models.BotConfig) *Engine {
@@ -35,18 +39,72 @@ func NewEngine(cfg models.BotConfig) *Engine {
 	if cfg.Testnet {
 		baseURL = "https://api-testnet.bybit.com"
 	}
-	return &Engine{
-		cfg:            cfg,
-		client:         &http.Client{Timeout: 10 * time.Second},
-		baseURL:        baseURL,
-		positions:      make(map[string]*models.PositionState),
-		cooldowns:      make(map[string]time.Time),
-		disabledTokens: make(map[string]bool),
+
+	e := &Engine{
+		cfg:               cfg,
+		client:            &http.Client{Timeout: 10 * time.Second},
+		baseURL:           baseURL,
+		positions:         make(map[string]*models.PositionState),
+		cooldowns:         make(map[string]time.Time),
+		disabledTokens:    make(map[string]bool),
+		maxTotalMarginUSD: 40.0,
+	}
+
+	e.wsEngine = NewWSEngine(cfg.ApiKey, cfg.ApiSecret, cfg.Testnet, e.handlePositionClosedWS)
+	return e
+}
+
+func (e *Engine) InitWebSocket(ctx context.Context) error {
+	if err := e.wsEngine.StartPublicTickerStream(ctx); err != nil {
+		log.Printf("[WARN] Failed to start public WS stream: %v", err)
+	}
+	if err := e.wsEngine.StartPrivateStream(ctx); err != nil {
+		log.Printf("[WARN] Failed to start private WS stream: %v", err)
+	}
+	return nil
+}
+
+func (e *Engine) handlePositionClosedWS(symbol string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if _, active := e.positions[symbol]; active {
+		log.Printf("[CLEANUP WS] Push notification: Position %s closed on exchange. Activating 15m Cooldown.", symbol)
+		delete(e.positions, symbol)
+		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
 	}
 }
 
-func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
+func (e *Engine) RefreshBalance(ctx context.Context) error {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if time.Since(e.lastBalanceCheck) < 5*time.Second && e.lastBalanceCheck.After(time.Time{}) {
+		return nil
+	}
+
+	bal, err := e.fetchWalletBalanceUniversal(ctx)
+	if err != nil {
+		return err
+	}
+
+	e.cachedBalance = bal
+	e.lastBalanceCheck = time.Now()
+	log.Printf("[BALANCE] Wallet USDT Available: %.2f USD", bal)
+	return nil
+}
+
+func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
+	// Подписка на публичный тикер в WS
+	_ = e.wsEngine.SubscribeTicker(c.Symbol)
+
+	e.mu.Lock()
+	currentUsedMargin := float64(len(e.positions)) * e.cfg.MarginPerTradeUSD
+	if currentUsedMargin+e.cfg.MarginPerTradeUSD > e.maxTotalMarginUSD {
+		e.mu.Unlock()
+		return nil
+	}
+
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
 		return nil
@@ -64,6 +122,12 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 		delete(e.cooldowns, c.Symbol)
 	}
+
+	requiredMarginWithBuffer := e.cfg.MarginPerTradeUSD * 1.05
+	if e.cachedBalance < requiredMarginWithBuffer {
+		e.mu.Unlock()
+		return fmt.Errorf("insufficient balance: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
+	}
 	e.mu.Unlock()
 
 	res, ok := c.Strategies[targetStrategy]
@@ -80,10 +144,27 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	// 1. Получение рыночных лимитов и текущей цены
-	currentPrice, err := e.getCurrentPrice(ctx, c.Symbol)
+	// 1. Извлечение цены из WS с фоллбэком на REST
+	currentPrice := 0.0
+	bidPrice, askPrice, _, err := e.getLiveTicker(ctx, c.Symbol)
 	if err != nil {
-		return fmt.Errorf("failed to fetch live price for %s: %w", c.Symbol, err)
+		if wsPrice, ok := e.wsEngine.GetLatestPrice(c.Symbol); ok {
+			currentPrice = wsPrice
+			bidPrice = wsPrice
+			askPrice = wsPrice
+		} else {
+			return fmt.Errorf("failed to fetch live price for %s: %w", c.Symbol, err)
+		}
+	} else {
+		spreadPct := (askPrice - bidPrice) / askPrice * 100.0
+		if spreadPct > 0.15 {
+			return fmt.Errorf("rejected %s: spread %.3f%% exceeds max 0.15%% threshold", c.Symbol, spreadPct)
+		}
+		if side == "Buy" {
+			currentPrice = askPrice
+		} else {
+			currentPrice = bidPrice
+		}
 	}
 
 	qtyStep, minQty, tickSize, minNotional, err := e.getInstrumentLimits(ctx, c.Symbol)
@@ -91,29 +172,19 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	// 2. Расчет объема позиции
-	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, currentPrice, qtyStep, minQty)
+	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, currentPrice, qtyStep, minQty, minNotional)
 	if qty <= 0 {
-		return fmt.Errorf("calculated qty (0) is below minQty (%.4f) for %s", minQty, c.Symbol)
+		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
 	}
 
-	notional := qty * currentPrice
-	if minNotional > 0 && notional < minNotional {
-		return fmt.Errorf("notional value %.2f USD is below minimum required %.2f USD for %s", notional, minNotional, c.Symbol)
-	}
-
-	// 3. Установка маржинального режима (Isolated) и плеча
 	_ = e.setTradeModeIsolated(ctx, c.Symbol)
 	if err := e.setLeverage(ctx, c.Symbol, e.cfg.MaxLeverage); err != nil {
 		log.Printf("[WARN] Set leverage for %s: %v", c.Symbol, err)
 	}
 
-	// 4. Расчет Stop Loss с гарантированным безопасным зазором от шума (минимум 2.5%)
-	minSLDist := currentPrice * 0.025
-	trailingDist := currentPrice * (e.cfg.TrailingPct / 100.0)
-	slDist := math.Max(minSLDist, trailingDist)
-
+	slDist := currentPrice * 0.020
 	slPrice := 0.0
+
 	if side == "Buy" {
 		slPrice = currentPrice - slDist
 		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < slPrice {
@@ -121,38 +192,38 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	} else {
 		slPrice = currentPrice + slDist
-		if c.Levels.NearestResistance > slPrice {
+		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance > slPrice {
 			slPrice = c.Levels.NearestResistance
 		}
 	}
 	slPrice = RoundToStep(slPrice, tickSize)
 
-	if !ValidateStopLoss(side, currentPrice, slPrice, 1.5) {
+	if !ValidateStopLoss(side, currentPrice, slPrice, 1.2) {
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
-	// 5. Расчет Take Profit с абсолютной математической гарантией (Risk/Reward = 1:2)
-	riskDist := math.Abs(currentPrice - slPrice)
+	actualRiskDist := math.Abs(currentPrice - slPrice)
+	minTPDist := currentPrice * 0.030
+	tpDist := math.Max(actualRiskDist*2.0, minTPDist)
 	tpPrice := 0.0
 
 	if side == "Buy" {
-		tpPrice = currentPrice + (riskDist * 2.0)
-		if c.Levels.NearestResistance > tpPrice {
+		tpPrice = currentPrice + tpDist
+		if c.Levels.NearestResistance > (currentPrice+minTPDist) && c.Levels.NearestResistance < tpPrice {
 			tpPrice = c.Levels.NearestResistance
 		}
 	} else {
-		tpPrice = currentPrice - (riskDist * 2.0)
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < tpPrice {
+		tpPrice = currentPrice - tpDist
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < (currentPrice-minTPDist) && c.Levels.NearestSupport > tpPrice {
 			tpPrice = c.Levels.NearestSupport
 		}
 	}
 	tpPrice = RoundToStep(tpPrice, tickSize)
 
-	if !ValidateTakeProfit(side, currentPrice, tpPrice, 2.0) {
+	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.5) {
 		return fmt.Errorf("take profit validation failed for %s (entry: %.4f, tp: %.4f)", c.Symbol, currentPrice, tpPrice)
 	}
 
-	// 6. Выполнение ордера
 	orderID, err := e.placeMarketOrder(ctx, c.Symbol, side, qty, qtyStep, slPrice, tpPrice, tickSize)
 	if err != nil {
 		return fmt.Errorf("order execution failed for %s: %w", c.Symbol, err)
@@ -185,6 +256,11 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 		return
 	}
 	e.mu.Unlock()
+
+	// Использование WebSocket-цены в реальном времени, если доступна
+	if wsPrice, ok := e.wsEngine.GetLatestPrice(symbol); ok && wsPrice > 0 {
+		currentPrice = wsPrice
+	}
 
 	if !e.hasActivePosition(ctx, symbol) {
 		log.Printf("[CLEANUP] Position %s closed on exchange. Activating 15m Cooldown.", symbol)
@@ -232,32 +308,10 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 }
 
 func (e *Engine) LogActivePositions(ctx context.Context) {
-	reqURL := fmt.Sprintf("%s/v5/position/list?category=linear&settleCoin=USDT", e.baseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return
-	}
+	path := "/v5/position/list"
+	queryString := "category=linear&settleCoin=USDT"
 
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	recvWindow := "5000"
-	rawSignature := timestamp + e.cfg.ApiKey + recvWindow
-
-	h := hmac.New(sha256.New, []byte(e.cfg.ApiSecret))
-	h.Write([]byte(rawSignature))
-	signature := hex.EncodeToString(h.Sum(nil))
-
-	req.Header.Set("X-BAPI-API-KEY", e.cfg.ApiKey)
-	req.Header.Set("X-BAPI-SIGN", signature)
-	req.Header.Set("X-BAPI-TIMESTAMP", timestamp)
-	req.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := e.doSignedGET(ctx, path, queryString)
 	if err != nil {
 		return
 	}
@@ -297,67 +351,106 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 	}
 }
 
-func (e *Engine) getCurrentPrice(ctx context.Context, symbol string) (float64, error) {
+func (e *Engine) fetchWalletBalanceUniversal(ctx context.Context) (float64, error) {
+	accountTypes := []string{"UNIFIED", "CONTRACT", "SPOT", "FUND"}
+	var lastAPIError string
+
+	for _, accType := range accountTypes {
+		path := "/v5/account/wallet-balance"
+		queryString := fmt.Sprintf("accountType=%s", accType)
+
+		body, err := e.doSignedGET(ctx, path, queryString)
+		if err != nil {
+			lastAPIError = fmt.Sprintf("HTTP error on %s: %v", accType, err)
+			continue
+		}
+
+		var res struct {
+			RetCode int    `json:"retCode"`
+			RetMsg  string `json:"retMsg"`
+			Result  struct {
+				List []struct {
+					Coin []struct {
+						Coin                string `json:"coin"`
+						AvailableToWithdraw string `json:"availableToWithdraw"`
+						WalletBalance       string `json:"walletBalance"`
+						Equity              string `json:"equity"`
+					} `json:"coin"`
+				} `json:"list"`
+			} `json:"result"`
+		}
+
+		if err := json.Unmarshal(body, &res); err != nil || res.RetCode != 0 || len(res.Result.List) == 0 {
+			continue
+		}
+
+		for _, coin := range res.Result.List[0].Coin {
+			if coin.Coin == "USDT" {
+				if coin.AvailableToWithdraw != "" {
+					bal, err := strconv.ParseFloat(coin.AvailableToWithdraw, 64)
+					if err == nil && bal >= 0 {
+						return bal, nil
+					}
+				}
+				if coin.WalletBalance != "" {
+					bal, err := strconv.ParseFloat(coin.WalletBalance, 64)
+					if err == nil && bal >= 0 {
+						return bal, nil
+					}
+				}
+			}
+		}
+	}
+
+	return 0.0, fmt.Errorf("unable to read USDT balance. Last API Diagnostic: %s", lastAPIError)
+}
+
+func (e *Engine) getLiveTicker(ctx context.Context, symbol string) (bid, ask, last float64, err error) {
 	reqURL := fmt.Sprintf("%s/v5/market/tickers?category=linear&symbol=%s", e.baseURL, symbol)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	var res struct {
 		RetCode int `json:"retCode"`
 		Result  struct {
 			List []struct {
+				Bid1Price string `json:"bid1Price"`
+				Ask1Price string `json:"ask1Price"`
 				LastPrice string `json:"lastPrice"`
 			} `json:"list"`
 		} `json:"result"`
 	}
 
 	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
-		return 0, fmt.Errorf("failed to parse ticker response for %s", symbol)
+		return 0, 0, 0, fmt.Errorf("failed to parse ticker response for %s", symbol)
 	}
 
-	return strconv.ParseFloat(res.Result.List[0].LastPrice, 64)
+	item := res.Result.List[0]
+	bid, _ = strconv.ParseFloat(item.Bid1Price, 64)
+	ask, _ = strconv.ParseFloat(item.Ask1Price, 64)
+	last, _ = strconv.ParseFloat(item.LastPrice, 64)
+
+	return bid, ask, last, nil
 }
 
 func (e *Engine) hasActivePosition(ctx context.Context, symbol string) bool {
-	reqURL := fmt.Sprintf("%s/v5/position/list?category=linear&symbol=%s", e.baseURL, symbol)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return false
-	}
+	path := "/v5/position/list"
+	queryString := fmt.Sprintf("category=linear&symbol=%s", symbol)
 
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	recvWindow := "5000"
-	rawSignature := timestamp + e.cfg.ApiKey + recvWindow
-
-	h := hmac.New(sha256.New, []byte(e.cfg.ApiSecret))
-	h.Write([]byte(rawSignature))
-	signature := hex.EncodeToString(h.Sum(nil))
-
-	req.Header.Set("X-BAPI-API-KEY", e.cfg.ApiKey)
-	req.Header.Set("X-BAPI-SIGN", signature)
-	req.Header.Set("X-BAPI-TIMESTAMP", timestamp)
-	req.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := e.doSignedGET(ctx, path, queryString)
 	if err != nil {
 		return false
 	}
@@ -486,6 +579,36 @@ func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl flo
 	}
 	_, err := e.doSignedPOST(ctx, "/v5/position/trading-stop", params, symbol)
 	return err
+}
+
+func (e *Engine) doSignedGET(ctx context.Context, path, queryString string) ([]byte, error) {
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	recvWindow := "5000"
+
+	rawSignature := timestamp + e.cfg.ApiKey + recvWindow + queryString
+
+	h := hmac.New(sha256.New, []byte(e.cfg.ApiSecret))
+	h.Write([]byte(rawSignature))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	fullURL := fmt.Sprintf("%s%s?%s", e.baseURL, path, queryString)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-BAPI-API-KEY", e.cfg.ApiKey)
+	req.Header.Set("X-BAPI-SIGN", signature)
+	req.Header.Set("X-BAPI-TIMESTAMP", timestamp)
+	req.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return io.ReadAll(resp.Body)
 }
 
 func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[string]interface{}, symbol string) ([]byte, error) {

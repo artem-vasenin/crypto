@@ -90,6 +90,11 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 		return
 	}
 
+	if err := engine.RefreshBalance(ctx); err != nil {
+		log.Printf("[ERROR] Balance refresh failed: %v", err)
+		return
+	}
+
 	engine.LogActivePositions(ctx)
 
 	data, err := os.ReadFile(filePath)
