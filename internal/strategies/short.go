@@ -2,15 +2,39 @@ package strategies
 
 import "universal-bybit-screener/models"
 
-// Short оценивает обычную направленную Short-позицию.
-// Структура получает максимальные веса: LH/LL на 1h важнее старшего TF, RSI/объём/funding
-// лишь подтверждают сигнал. Противоположная HH/HL-структура получает крупный штраф.
+// Short оценивает направленную Short-позицию с использованием матрицы Price/OI.
 type Short struct{}
 
 func (Short) Name() string { return "short" }
-func (Short) Evaluate(m models.MarketData, i models.Indicators, s map[string]models.Structure, l models.Levels) models.StrategyResult {
+
+func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
+	st1 := c.Structure["1h"]
+	st4 := c.Structure["4h"]
+
+	// 1. HARD GATES
+	if st1.HighState == "HH" && st1.LowState == "HL" {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h confirmed uptrend"}
+	}
+
+	priceDown := c.Market.Change24h < 0
+	oiDown := c.Derivatives.OpenInterestChange < 0
+	oiUp := c.Derivatives.OpenInterestChange > 0
+
+	// Long Liquidation: цена падает, OI падает. Движение на стопах, после которого возможен резкий отскок (V-shape).
+	if priceDown && oiDown && c.Market.Change24h < -2 && c.Derivatives.OpenInterestChange < -2 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "long liquidation detected (Price DOWN, OI DOWN)"}
+	}
+
 	score := 0.0
-	st1, st4 := s["1h"], s["4h"]
+
+	// 2. OI / PRICE MATRIX SCORING
+	if priceDown && oiUp {
+		score += 15 // Aggressive Shorts (крупный игрок давит по рынку)
+	} else if !priceDown && oiDown {
+		score -= 10 // Short Covering (шорты закрываются)
+	}
+
+	// 3. STRUCTURE SCORING
 	if st1.HighState == "LH" {
 		score += 20
 	}
@@ -23,26 +47,35 @@ func (Short) Evaluate(m models.MarketData, i models.Indicators, s map[string]mod
 	if st4.LowState == "LL" {
 		score += 12
 	}
-	if i.RSI1h < 50 && i.RSI1h > 30 {
-		score += 10
-	} else if i.RSI1h <= 30 {
-		score -= 5
-	}
-	if i.RSI4h < 50 && i.RSI4h > 30 {
-		score += 8
-	}
-	if m.Ticker.Price24hPcnt < 0 {
-		score += 5
-	}
-	if i.VolumeRatio1h > 1 {
-		score += 6
-	}
-	if m.Ticker.FundingRate > 0 {
-		score += 3
-	}
+
 	if st1.HighState == "HH" || st1.LowState == "HL" {
 		score -= 15
 	}
+
+	// 4. INDICATORS & LIQUIDITY
+	if c.Indicators.RSI1h < 50 && c.Indicators.RSI1h > 30 {
+		score += 10
+	} else if c.Indicators.RSI1h <= 30 {
+		score -= 5 // Перепроданность
+	}
+
+	if c.Indicators.RSI4h < 50 && c.Indicators.RSI4h > 30 {
+		score += 8
+	}
+
+	if c.Indicators.VolumeRatio1h > 1 {
+		score += 6
+	}
+
+	if c.Derivatives.FundingRate > 0 {
+		score += 3 // Лонги платят шортам
+	}
+
 	score = clamp(score)
-	return models.StrategyResult{Score: score, Status: status(score), Reason: "directional downtrend + momentum + volume + derivatives"}
+
+	return models.StrategyResult{
+		Score:  score,
+		Status: status(score),
+		Reason: "directional short + aggressive shorting (OI/Price matrix)",
+	}
 }

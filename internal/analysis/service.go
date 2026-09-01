@@ -1,8 +1,10 @@
+// internal/analysis/service.go
 package analysis
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -25,18 +27,17 @@ func NewService(c *bybit.Client, cfg config.Config, s strategies.Strategy) *Serv
 	return &Service{client: c, cfg: cfg, strategy: s}
 }
 
-// Run строит pipeline: сначала дешёвый фильтр ликвидности, затем глубокий
-// анализ ограниченного пула. В отличие от старой версии предварительный пул
-// не сортируется по росту 24h, иначе Neutral Grid теряет боковые монеты.
 func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	inst, err := s.client.Instruments(ctx)
 	if err != nil {
-		return models.ScreeningResult{}, fmt.Errorf("instruments: %w", err)
+		return models.ScreeningResult{}, fmt.Errorf("instruments REST fetch failed: %w", err)
 	}
+
 	tickers, err := s.client.Tickers(ctx)
 	if err != nil {
-		return models.ScreeningResult{}, fmt.Errorf("tickers: %w", err)
+		return models.ScreeningResult{}, fmt.Errorf("tickers REST fetch failed: %w", err)
 	}
+
 	type pair struct {
 		i models.Instrument
 		t models.Ticker
@@ -47,23 +48,48 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 		if !ok || t.LastPrice <= 0 || t.LastPrice > s.cfg.Filters.MaxPrice || t.Turnover24h < s.cfg.Filters.MinTurnover24h {
 			continue
 		}
-		// Для Grid уже на дешёвом этапе можно убрать заведомо дорогой спред.
-		// Long/Short оставляем без этого ограничения: им ликвидность важна,
-		// но требования к издержкам входа/выхода у них другие.
 		if isGridStrategy(s.strategy.Name()) && spreadPct(t) > s.cfg.Filters.MaxGridSpreadPct {
 			continue
 		}
 		filtered = append(filtered, pair{i, t})
 	}
-	sort.Slice(filtered, func(i, j int) bool { return filtered[i].t.Turnover24h > filtered[j].t.Turnover24h })
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].t.Turnover24h > filtered[j].t.Turnover24h
+	})
+
 	if len(filtered) > s.cfg.Filters.PreselectCandidates {
 		filtered = filtered[:s.cfg.Filters.PreselectCandidates]
+	}
+
+	// ---------------------------------------------------------
+	// Инициализация WebSocket L2 OrderBook Cache
+	// ---------------------------------------------------------
+	obCache := bybit.NewOrderBookCache()
+	wsClient := bybit.NewWSClient(obCache)
+
+	var symbols []string
+	for _, p := range filtered {
+		symbols = append(symbols, p.i.Symbol)
+	}
+
+	log.Printf("[INFO] Initializing L2 OrderBook WS Stream for %d preselected tickers...", len(symbols))
+	if err := wsClient.SubscribeOrderBooks(ctx, symbols); err != nil {
+		return models.ScreeningResult{}, fmt.Errorf("ws OrderBook subscription failed: %w", err)
+	}
+
+	// Warmup: Ожидание первичного каскада WS-snapshots (3 секунды)
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		return models.ScreeningResult{}, ctx.Err()
 	}
 
 	results := make([]models.Candidate, 0, len(filtered))
 	var mu sync.Mutex
 	sem := make(chan struct{}, s.cfg.Concurrency)
 	var wg sync.WaitGroup
+
 	for _, p := range filtered {
 		p := p
 		wg.Add(1)
@@ -75,25 +101,32 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 				return
 			}
 			defer func() { <-sem }()
-			cand, e := s.analyze(ctx, p.i, p.t)
+
+			cand, e := s.analyze(ctx, obCache, p.i, p.t)
 			if e != nil {
+				log.Printf("[WARN] Symbol %s analysis skipped: %v", p.i.Symbol, e)
 				return
 			}
+
 			mu.Lock()
 			results = append(results, cand)
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
+
 	if ctx.Err() != nil && len(results) == 0 {
-		return models.ScreeningResult{}, fmt.Errorf("analysis timeout: %w", ctx.Err())
+		return models.ScreeningResult{}, fmt.Errorf("analysis execution timeout/cancelled: %w", ctx.Err())
 	}
+
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Strategies[s.strategy.Name()].Score > results[j].Strategies[s.strategy.Name()].Score
 	})
+
 	if len(results) > s.cfg.Filters.TopCandidates {
 		results = results[:s.cfg.Filters.TopCandidates]
 	}
+
 	return models.ScreeningResult{
 		GeneratedAt: time.Now().UTC(),
 		Strategy:    s.strategy.Name(),
@@ -114,9 +147,7 @@ func spreadPct(t models.Ticker) float64 {
 	return (t.Ask1Price - t.Bid1Price) / t.LastPrice * 100
 }
 
-// analyze собирает независимые данные параллельно и строит единый snapshot,
-// который затем без повторных API-запросов оценивают все пять стратегий.
-func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.Ticker) (models.Candidate, error) {
+func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, inst models.Instrument, t models.Ticker) (models.Candidate, error) {
 	type res struct {
 		c   []models.Candle
 		err error
@@ -124,7 +155,8 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.
 	ch15, ch1, ch4 := make(chan res, 1), make(chan res, 1), make(chan res, 1)
 	oiCh := make(chan []models.OpenInterestPoint, 1)
 	fundCh := make(chan []models.FundingPoint, 1)
-	bookCh := make(chan models.OrderBookMetrics, 1)
+
+	// REST-запросы ограничены только историческими Klines, OI и Funding
 	go func() {
 		c, e := s.client.Klines(ctx, inst.Symbol, "15", s.cfg.Analysis.KlineLimit15m)
 		ch15 <- res{c, e}
@@ -139,13 +171,17 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.
 		oiCh <- o
 	}()
 	go func() { f, _ := s.client.Funding(ctx, inst.Symbol, s.cfg.Analysis.FundingLimit); fundCh <- f }()
-	go func() { b, _ := s.client.OrderBook(ctx, inst.Symbol, s.cfg.Analysis.OrderBookLimit); bookCh <- b }()
+
 	a, b, d := <-ch15, <-ch1, <-ch4
-	oi, fund, book := <-oiCh, <-fundCh, <-bookCh
+	oi, fund := <-oiCh, <-fundCh
+
 	if a.err != nil || b.err != nil || d.err != nil {
-		return models.Candidate{}, fmt.Errorf("kline error")
+		return models.Candidate{}, fmt.Errorf("kline fetch error: 15m_err=%v, 1h_err=%v, 4h_err=%v", a.err, b.err, d.err)
 	}
-	md := models.MarketData{Instrument: inst, Ticker: t, Candles15m: a.c, Candles1h: b.c, Candles4h: d.c, OpenInterest: oi, Funding: fund, OrderBook: book}
+
+	// Чтение неблокирующего метрического среза L2-стакана из WS-кэша O(1)
+	book := obCache.GetMetrics(inst.Symbol)
+
 	ind := models.Indicators{
 		RSI15m:        indicators.RSI(a.c, 14),
 		RSI1h:         indicators.RSI(b.c, 14),
@@ -160,19 +196,27 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.
 		ind.ATR1hPct = ind.ATR1h / t.LastPrice * 100
 		ind.ATR4hPct = ind.ATR4h / t.LastPrice * 100
 	}
+
 	structures := map[string]models.Structure{
 		"15m": structure.Analyze(a.c, 2, 5),
 		"1h":  structure.Analyze(b.c, 2, 5),
 		"4h":  structure.Analyze(d.c, 2, 5),
 	}
+
 	levels := structure.ApplyATR(structure.Levels(structures["1h"], t.LastPrice), ind.ATR1h, t.LastPrice)
-	der := models.Derivatives{FundingRate: t.FundingRate, OpenInterest: t.OpenInterest, SpreadPct: spreadPct(t)}
+
+	der := models.Derivatives{
+		FundingRate:  t.FundingRate,
+		OpenInterest: t.OpenInterest,
+		SpreadPct:    spreadPct(t),
+	}
 	der.FundingAvg24h = fundingAverage24h(fund)
-	// Сохраняем старое поле как совместимый alias, но теперь оно означает именно среднее за 24h.
 	der.FundingAvg = der.FundingAvg24h
+
 	if len(oi) >= 2 && oi[0].OpenInterest > 0 {
 		der.OpenInterestChange = (oi[len(oi)-1].OpenInterest/oi[0].OpenInterest - 1) * 100
 	}
+
 	var c models.Candidate
 	c.Symbol = inst.Symbol
 	c.Market.Price = t.LastPrice
@@ -188,19 +232,19 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, t models.
 	c.Derivatives = der
 	c.OrderBook = book
 	c.Strategies = make(map[string]models.StrategyResult, len(strategies.Names()))
+
+	// Оценка закомпонованной структуры Candidate во всех 5 стратегиях
 	for _, name := range strategies.Names() {
 		st, e := strategies.New(name)
 		if e != nil {
 			return models.Candidate{}, e
 		}
-		c.Strategies[name] = st.Evaluate(md, ind, structures, levels)
+		c.Strategies[name] = st.Evaluate(&c)
 	}
+
 	return c, nil
 }
 
-// fundingAverage24h берёт только историю внутри 24 часов относительно
-// последней доступной точки. Это важно, потому что интервал funding у разных
-// контрактов может отличаться и может динамически меняться.
 func fundingAverage24h(points []models.FundingPoint) float64 {
 	if len(points) == 0 {
 		return 0
@@ -226,8 +270,6 @@ func fundingAverage24h(points []models.FundingPoint) float64 {
 	return sum / float64(count)
 }
 
-// changeN считает процентное изменение N свечей назад; если истории меньше N,
-// используется самая старая доступная свеча.
 func changeN(c []models.Candle, n int) float64 {
 	if len(c) < 2 {
 		return 0
@@ -242,9 +284,6 @@ func changeN(c []models.Candle, n int) float64 {
 	return (c[len(c)-1].Close/c[start].Close - 1) * 100
 }
 
-// BuildAIPrompt формирует единый prompt для последующего анализа JSON внешней ИИ-моделью.
-// Prompt не пытается заменить scoring: ИИ должен перепроверить исходные метрики,
-// найти противоречия и только после этого сделать вывод по кандидатам.
 func BuildAIPrompt(strategy string) string {
 	return fmt.Sprintf(`Ты — криптоаналитик. Проанализируй JSON-скрининг Bybit для стратегии "%s".
 

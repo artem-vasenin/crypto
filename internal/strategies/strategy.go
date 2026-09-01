@@ -9,11 +9,9 @@ import (
 // Strategy описывает единый интерфейс всех режимов скриннера.
 type Strategy interface {
 	Name() string
-	Evaluate(models.MarketData, models.Indicators, map[string]models.Structure, models.Levels) models.StrategyResult
+	Evaluate(c *models.Candidate) models.StrategyResult
 }
 
-// Names возвращает канонический порядок стратегий. Он используется и анализом,
-// и тестами, поэтому новая стратегия не может случайно забыться в одном месте.
 func Names() []string { return []string{"short-grid", "short", "long-grid", "long", "neutral-grid"} }
 
 func New(name string) (Strategy, error) {
@@ -31,6 +29,7 @@ func New(name string) (Strategy, error) {
 	}
 	return nil, fmt.Errorf("unknown strategy %q", name)
 }
+
 func clamp(v float64) float64 {
 	if v < 0 {
 		return 0
@@ -40,6 +39,7 @@ func clamp(v float64) float64 {
 	}
 	return v
 }
+
 func status(score float64) string {
 	switch {
 	case score >= 75:

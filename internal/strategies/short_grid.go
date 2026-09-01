@@ -1,415 +1,90 @@
 package strategies
 
-import (
-	"time"
-	"universal-bybit-screener/models"
-)
+import "universal-bybit-screener/models"
 
-// ShortGrid ищет импульс вверх, который начал замедляться
-// возле сопротивления и имеет признаки локального разворота.
-//
-// В отличие от обычного short, short-grid не должен просто искать
-// падающие монеты. Нам нужен диапазон, в котором цена может ходить
-// между сопротивлением и поддержкой.
-//
-// Поэтому стратегия сначала применяет жёсткие фильтры (hard gates),
-// а уже после этого рассчитывает score.
 type ShortGrid struct{}
 
-func (ShortGrid) Name() string {
-	return "short-grid"
-}
+func (ShortGrid) Name() string { return "short-grid" }
 
-func (ShortGrid) Evaluate(
-	m models.MarketData,
-	i models.Indicators,
-	s map[string]models.Structure,
-	l models.Levels,
-) models.StrategyResult {
+func (ShortGrid) Evaluate(c *models.Candidate) models.StrategyResult {
+	st1h, ok1h := c.Structure["1h"]
+	st15m, ok15m := c.Structure["15m"]
 
-	st1h, ok1h := s["1h"]
-	st15m, ok15m := s["15m"]
-	st4h, ok4h := s["4h"]
-
-	// ------------------------------------------------------------
 	// HARD GATES
-	// ------------------------------------------------------------
-
-	// Для grid необходим полноценный диапазон.
-	if l.NearestResistance <= 0 || l.NearestSupport <= 0 {
-		return rejectShortGrid("нет полноценного диапазона support/resistance")
+	if c.Levels.NearestResistance <= 0 || c.Levels.NearestSupport <= 0 {
+		return rejectShortGrid("missing support/resistance boundaries")
 	}
 
-	// Для short-grid обязательно нужен LH на 1h.
 	if !ok1h || st1h.HighState != "LH" {
-		return rejectShortGrid("на 1h нет подтверждённого LH")
+		return rejectShortGrid("no LH confirmation on 1h (momentum still up)")
 	}
 
-	// Явный бычий тренд на 4h запрещаем.
-	if ok4h && st4h.HighState == "HH" && st4h.LowState == "HL" {
-		return rejectShortGrid("на 4h сохраняется сильная бычья структура HH+HL")
+	if c.Market.Change24h < 5 && c.Market.Change3d < 5 {
+		return rejectShortGrid("insufficient bullish impulse")
 	}
 
-	// ------------------------------------------------------------
-	// Свежий импульс
-	// ------------------------------------------------------------
-
-	// Для short-grid нам нужен недавний рост.
-	//
-	// 24h берём непосредственно из Ticker.
-	// 3d рассчитываем по часовым свечам, потому что отдельного
-	// поля Price3dPcnt в MarketData.Ticker нет.
-	change3dPct := change3d(m.Candles1h)
-
-	if m.Ticker.Price24hPcnt < 5 && change3dPct < 5 {
-		return rejectShortGrid("нет достаточно свежего восходящего импульса")
+	if c.Market.Price <= 0 {
+		return rejectShortGrid("invalid price")
 	}
 
-	// ------------------------------------------------------------
-	// Сопротивление
-	// ------------------------------------------------------------
-
-	if m.Ticker.LastPrice <= 0 {
-		return rejectShortGrid("некорректная текущая цена")
+	resDistPct := (c.Levels.NearestResistance - c.Market.Price) / c.Market.Price * 100
+	if resDistPct < 0 {
+		return rejectShortGrid("price breached resistance")
+	}
+	if resDistPct > 5 {
+		return rejectShortGrid("too far from resistance")
 	}
 
-	resistanceDistancePct :=
-		(l.NearestResistance - m.Ticker.LastPrice) /
-			m.Ticker.LastPrice * 100
-
-	// Цена не должна уже находиться выше сопротивления.
-	if resistanceDistancePct < 0 {
-		return rejectShortGrid("цена уже выше ближайшего сопротивления")
+	if c.Levels.RangePositionPct < 50 {
+		return rejectShortGrid("entry too deep inside the range")
 	}
 
-	// Слишком далёкое сопротивление нам не интересно.
-	if resistanceDistancePct > 6 {
-		return rejectShortGrid("сопротивление слишком далеко")
+	if c.Levels.RangeToATR1h < 2.0 {
+		return rejectShortGrid("range too narrow vs ATR (high risk of breakout)")
 	}
 
-	// ------------------------------------------------------------
-	// Положение внутри диапазона
-	// ------------------------------------------------------------
-
-	// Short-grid открываем в верхней части диапазона.
-	if l.RangePositionPct < 40 {
-		return rejectShortGrid("цена находится слишком близко к поддержке")
-	}
-
-	// ------------------------------------------------------------
-	// Размер диапазона
-	// ------------------------------------------------------------
-
-	// Диапазон должен быть минимум примерно 2 ATR.
-	if l.RangeToATR1h < 2.0 {
-		return rejectShortGrid("диапазон слишком узкий относительно ATR")
-	}
-
-	// Дополнительный абсолютный фильтр.
-	if l.RangeWidthPct < 4 {
-		return rejectShortGrid("абсолютная ширина диапазона слишком мала")
-	}
-
-	// ------------------------------------------------------------
-	// Локальное ослабление
-	// ------------------------------------------------------------
-
-	if ok15m {
-		if st15m.HighState != "LH" && st15m.LowState != "LL" {
-			return rejectShortGrid("на 15m нет признаков локального ослабления")
-		}
-	}
-
-	// ------------------------------------------------------------
-	// SCORE
-	// ------------------------------------------------------------
-
+	// SCORING
 	score := 0.0
 
-	// Свежий импульс 24h.
-	if m.Ticker.Price24hPcnt >= 20 {
+	if c.Market.Change24h >= 15 {
+		score += 15
+	} else if c.Market.Change24h >= 8 {
 		score += 10
-	} else if m.Ticker.Price24hPcnt >= 10 {
-		score += 7
-	} else if m.Ticker.Price24hPcnt >= 5 {
-		score += 4
-	}
-
-	// Импульс за 3 дня.
-	if change3dPct >= 20 {
-		score += 7
-	} else if change3dPct >= 10 {
+	} else if c.Market.Change24h >= 5 {
 		score += 5
-	} else if change3dPct >= 5 {
-		score += 3
-	}
-
-	// ------------------------------------------------------------
-	// Волатильность
-	// ------------------------------------------------------------
-
-	if i.ATR1hPct >= 5 {
-		score += 10
-	} else if i.ATR1hPct >= 3 {
-		score += 8
-	} else if i.ATR1hPct >= 2 {
-		score += 5
-	} else if i.ATR1hPct >= 1.5 {
-		score += 3
-	}
-
-	// ------------------------------------------------------------
-	// Структура
-	// ------------------------------------------------------------
-
-	if st1h.HighState == "LH" {
-		score += 12
-	}
-
-	if st1h.LowState == "LL" {
-		score += 5
-	} else if st1h.LowState == "HL" {
-		score += 2
 	}
 
 	if ok15m {
-		if st15m.HighState == "LH" {
-			score += 7
-		}
-
-		if st15m.LowState == "LL" {
-			score += 5
-		}
-
-		if st15m.HighState == "HH" && st15m.LowState == "HL" {
-			score -= 8
+		if st15m.HighState == "LH" && st15m.LowState == "LL" {
+			score += 15
+		} else if st15m.HighState == "HH" {
+			score -= 15
 		}
 	}
 
-	// ------------------------------------------------------------
-	// Сопротивление
-	// ------------------------------------------------------------
-
 	switch {
-	case resistanceDistancePct <= 2:
-		score += 12
-	case resistanceDistancePct <= 4:
-		score += 9
-	case resistanceDistancePct <= 6:
-		score += 5
-	}
-
-	// ------------------------------------------------------------
-	// Положение внутри диапазона
-	// ------------------------------------------------------------
-
-	switch {
-	case l.RangePositionPct >= 70:
+	case resDistPct <= 1.5:
+		score += 20
+	case resDistPct <= 3.0:
 		score += 10
-	case l.RangePositionPct >= 55:
-		score += 7
-	case l.RangePositionPct >= 40:
-		score += 4
 	}
 
-	// ------------------------------------------------------------
-	// Range / ATR
-	// ------------------------------------------------------------
-
-	switch {
-	case l.RangeToATR1h >= 3:
-		score += 8
-	case l.RangeToATR1h >= 2.5:
-		score += 6
-	case l.RangeToATR1h >= 2:
-		score += 4
-	}
-
-	// ------------------------------------------------------------
-	// Volume
-	// ------------------------------------------------------------
-
-	if i.VolumeRatio1h >= 2 {
-		score += 6
-	} else if i.VolumeRatio1h >= 1.5 {
-		score += 4
-	} else if i.VolumeRatio1h >= 1.2 {
-		score += 2
-	}
-
-	if i.VolumeTrend1h >= 2 {
+	if c.Indicators.VolumeRatio1h >= 1.5 {
 		score += 5
-	} else if i.VolumeTrend1h >= 1.2 {
-		score += 3
 	}
 
-	// ------------------------------------------------------------
-	// Funding
-	// ------------------------------------------------------------
-
-	if m.Ticker.FundingRate > 0.0001 {
+	if c.Market.SpreadPct <= 0.1 {
 		score += 5
-	} else if m.Ticker.FundingRate > 0 {
-		score += 2
 	}
 
-	if len(m.Funding) > 0 && m.Funding[0].Rate > 0 {
-		score += 2
-	}
-
-	// ------------------------------------------------------------
-	// Open Interest
-	// ------------------------------------------------------------
-
-	if len(m.OpenInterest) >= 2 {
-		first := m.OpenInterest[0].OpenInterest
-		last := m.OpenInterest[len(m.OpenInterest)-1].OpenInterest
-
-		if first > 0 {
-			oiChangePct := (last - first) / first * 100
-
-			if oiChangePct <= -10 {
-				score += 7
-			} else if oiChangePct <= -5 {
-				score += 5
-			} else if oiChangePct < 0 {
-				score += 2
-			} else if oiChangePct >= 15 {
-				score -= 5
-			}
-		}
-	}
-
-	// ------------------------------------------------------------
-	// Order Book
-	// ------------------------------------------------------------
-
-	if m.OrderBook.ImbalancePct <= -15 {
-		score += 6
-	} else if m.OrderBook.ImbalancePct <= -10 {
-		score += 4
-	} else if m.OrderBook.ImbalancePct <= -5 {
-		score += 2
-	} else if m.OrderBook.ImbalancePct >= 30 {
-		score -= 6
-	} else if m.OrderBook.ImbalancePct >= 20 {
-		score -= 4
-	}
-
-	// ------------------------------------------------------------
-	// Spread
-	// ------------------------------------------------------------
-
-	if m.Ticker.LastPrice > 0 &&
-		m.Ticker.Bid1Price > 0 &&
-		m.Ticker.Ask1Price > 0 {
-
-		spreadPct :=
-			(m.Ticker.Ask1Price - m.Ticker.Bid1Price) /
-				m.Ticker.LastPrice * 100
-
-		if spreadPct <= 0.05 {
-			score += 5
-		} else if spreadPct <= 0.15 {
-			score += 3
-		} else if spreadPct > 0.5 {
-			score -= 8
-		}
-	}
-
-	// ------------------------------------------------------------
-	// Дополнительный штраф
-	// ------------------------------------------------------------
-
-	if st1h.HighState == "LH" &&
-		st1h.LowState == "HL" &&
-		ok15m &&
-		st15m.HighState == "HH" &&
-		st15m.LowState == "HL" {
-
-		score -= 10
+	if c.Derivatives.FundingRate > 0.0001 {
+		score += 10
 	}
 
 	score = clamp(score)
-
-	return models.StrategyResult{
-		Score:  score,
-		Status: status(score),
-		Reason: "confirmed impulse exhaustion near resistance + range + bearish structure",
-	}
+	return models.StrategyResult{Score: score, Status: status(score), Reason: "exhausted impulse near resistance with confirmed local break"}
 }
 
-// change3d рассчитывает изменение цены примерно за последние 3 суток.
-//
-// Используем часовые свечи, поэтому 72 часа = 72 свечи.
-//
-// Формула:
-//
-//	(current close - close 72h ago) / close 72h ago * 100
-//
-// Если данных недостаточно, возвращаем 0.
-//
-// Важно: функция не предполагает, что candles отсортированы в каком-либо
-// конкретном направлении. Для надёжности ищем самую старую и самую новую
-// свечу и используем время свечей.
-func change3d(candles []models.Candle) float64 {
-	if len(candles) < 2 {
-		return 0
-	}
-
-	latest := candles[0]
-	earliest := candles[0]
-
-	for _, candle := range candles[1:] {
-		if candle.Time.Before(earliest.Time) {
-			earliest = candle
-		}
-
-		if candle.Time.After(latest.Time) {
-			latest = candle
-		}
-	}
-
-	// Нам нужны данные минимум примерно за 3 суток.
-	duration := latest.Time.Sub(earliest.Time)
-
-	if duration < 72*60*60 {
-		return 0
-	}
-
-	// Ищем свечу, которая максимально близка к моменту
-	// "72 часа назад" от последней свечи.
-	targetTime := latest.Time.Add(-72 * time.Hour)
-
-	var reference models.Candle
-	found := false
-
-	for _, candle := range candles {
-		if candle.Time.After(targetTime) {
-			continue
-		}
-
-		if !found || candle.Time.After(reference.Time) {
-			reference = candle
-			found = true
-		}
-	}
-
-	if !found || reference.Close <= 0 {
-		return 0
-	}
-
-	return (latest.Close - reference.Close) / reference.Close * 100
-}
-
-// rejectShortGrid полностью исключает монету из кандидатов.
-//
-// Лучше получить 0 кандидатов, чем протащить сомнительную монету
-// высоким score.
 func rejectShortGrid(reason string) models.StrategyResult {
-	return models.StrategyResult{
-		Score:  0,
-		Status: "reject",
-		Reason: reason,
-	}
+	return models.StrategyResult{Score: 0, Status: "reject", Reason: reason}
 }
