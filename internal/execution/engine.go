@@ -80,7 +80,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	// 1. Получение актуальной цены и спецификаций
+	// 1. Получение рыночных лимитов и текущей цены
 	currentPrice, err := e.getCurrentPrice(ctx, c.Symbol)
 	if err != nil {
 		return fmt.Errorf("failed to fetch live price for %s: %w", c.Symbol, err)
@@ -108,51 +108,47 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		log.Printf("[WARN] Set leverage for %s: %v", c.Symbol, err)
 	}
 
-	// 4. Расчет Stop Loss с защитой от некорректных внешних уровней
+	// 4. Расчет Stop Loss с гарантированным безопасным зазором от шума (минимум 2.5%)
+	minSLDist := currentPrice * 0.025
 	trailingDist := currentPrice * (e.cfg.TrailingPct / 100.0)
-	slPrice := 0.0
+	slDist := math.Max(minSLDist, trailingDist)
 
+	slPrice := 0.0
 	if side == "Buy" {
-		slPrice = currentPrice - trailingDist
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > slPrice {
+		slPrice = currentPrice - slDist
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < slPrice {
 			slPrice = c.Levels.NearestSupport
 		}
 	} else {
-		slPrice = currentPrice + trailingDist
-		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < slPrice {
+		slPrice = currentPrice + slDist
+		if c.Levels.NearestResistance > slPrice {
 			slPrice = c.Levels.NearestResistance
 		}
 	}
 	slPrice = RoundToStep(slPrice, tickSize)
 
-	if !ValidateStopLoss(side, currentPrice, slPrice, 0.2) {
+	if !ValidateStopLoss(side, currentPrice, slPrice, 1.5) {
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
-	// 5. Расчет Take Profit с абсолютной математической гарантией (R:R = 1:2)
+	// 5. Расчет Take Profit с абсолютной математической гарантией (Risk/Reward = 1:2)
 	riskDist := math.Abs(currentPrice - slPrice)
 	tpPrice := 0.0
 
 	if side == "Buy" {
 		tpPrice = currentPrice + (riskDist * 2.0)
-		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < tpPrice {
+		if c.Levels.NearestResistance > tpPrice {
 			tpPrice = c.Levels.NearestResistance
-		}
-		if tpPrice <= currentPrice {
-			tpPrice = currentPrice + (riskDist * 2.0)
 		}
 	} else {
 		tpPrice = currentPrice - (riskDist * 2.0)
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > tpPrice {
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < tpPrice {
 			tpPrice = c.Levels.NearestSupport
-		}
-		if tpPrice >= currentPrice || tpPrice <= 0 {
-			tpPrice = currentPrice - (riskDist * 2.0)
 		}
 	}
 	tpPrice = RoundToStep(tpPrice, tickSize)
 
-	if !ValidateTakeProfit(side, currentPrice, tpPrice, 0.2) {
+	if !ValidateTakeProfit(side, currentPrice, tpPrice, 2.0) {
 		return fmt.Errorf("take profit validation failed for %s (entry: %.4f, tp: %.4f)", c.Symbol, currentPrice, tpPrice)
 	}
 
@@ -485,7 +481,6 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
-		"symbol":      symbol,
 		"stopLoss":    strconv.FormatFloat(sl, 'f', 4, 64),
 		"positionIdx": 0,
 	}

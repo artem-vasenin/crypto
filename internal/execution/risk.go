@@ -35,7 +35,7 @@ func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQt
 	return qty
 }
 
-// RoundToStep округляет число строго кратно step через форматирование строк без погрешности float64
+// RoundToStep округляет ценовое значение строго кратно step
 func RoundToStep(val, step float64) float64 {
 	if step <= 0 || val <= 0 {
 		return val
@@ -68,7 +68,7 @@ func FormatStep(val, step float64) string {
 	return strconv.FormatFloat(val, 'f', precision, 64)
 }
 
-// ValidateStopLoss проверяет физическую и процентную корректность Stop Loss
+// ValidateStopLoss проверяет физическую корректность и минимальный зазор SL (от 1.5% до 15%)
 func ValidateStopLoss(side string, entryPrice, slPrice, minDistancePct float64) bool {
 	if slPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -90,7 +90,7 @@ func ValidateStopLoss(side string, entryPrice, slPrice, minDistancePct float64) 
 	return distPct >= minDistancePct && distPct <= 15.0
 }
 
-// ValidateTakeProfit проверяет физическую и процентную корректность Take Profit
+// ValidateTakeProfit проверяет физическую корректность TP
 func ValidateTakeProfit(side string, entryPrice, tpPrice, minDistancePct float64) bool {
 	if tpPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -109,5 +109,5 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minDistancePct float64
 		distPct = (entryPrice - tpPrice) / entryPrice * 100
 	}
 
-	return distPct >= minDistancePct && distPct <= 20.0
+	return distPct >= minDistancePct && distPct <= 30.0
 }

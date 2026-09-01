@@ -19,10 +19,10 @@
   },
   "execution": {
     "testnet": true,
-    "max_leverage": 3,
-    "margin_per_trade_usd": 15.0,
-    "min_score": 40.0,
-    "trailing_pct": 1.5,
+    "max_leverage": 2,
+    "margin_per_trade_usd": 10.0,
+    "min_score": 75.0,
+    "trailing_pct": 2.5,
     "check_interval": "1m"
   },
   "concurrency": 8,
