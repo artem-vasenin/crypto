@@ -28,12 +28,14 @@ type Config struct {
 		OrderBookLimit    int `json:"order_book_limit"`
 	} `json:"analysis"`
 	Execution struct {
-		Testnet           bool    `json:"testnet"`
-		MaxLeverage       int     `json:"max_leverage"`
-		MarginPerTradeUSD float64 `json:"margin_per_trade_usd"`
-		MinScore          float64 `json:"min_score"`
-		TrailingPct       float64 `json:"trailing_pct"`
-		CheckInterval     string  `json:"check_interval"`
+		Testnet            bool    `json:"testnet"`
+		MaxLeverage        int     `json:"max_leverage"`
+		MarginPerTradeUSD  float64 `json:"margin_per_trade_usd"`
+		MaxTotalMarginUSD  float64 `json:"max_total_margin_usd"`
+		MaxActivePositions int     `json:"max_active_positions"`
+		MinScore           float64 `json:"min_score"`
+		TrailingPct        float64 `json:"trailing_pct"`
+		CheckInterval      string  `json:"check_interval"`
 	} `json:"execution"`
 	Concurrency int           `json:"concurrency"`
 	HTTPTimeout time.Duration `json:"-"`
@@ -65,12 +67,14 @@ type rawConfig struct {
 		OrderBookLimit    int `json:"order_book_limit"`
 	} `json:"analysis"`
 	Execution struct {
-		Testnet           bool    `json:"testnet"`
-		MaxLeverage       int     `json:"max_leverage"`
-		MarginPerTradeUSD float64 `json:"margin_per_trade_usd"`
-		MinScore          float64 `json:"min_score"`
-		TrailingPct       float64 `json:"trailing_pct"`
-		CheckInterval     string  `json:"check_interval"`
+		Testnet            bool    `json:"testnet"`
+		MaxLeverage        int     `json:"max_leverage"`
+		MarginPerTradeUSD  float64 `json:"margin_per_trade_usd"`
+		MaxTotalMarginUSD  float64 `json:"max_total_margin_usd"`
+		MaxActivePositions int     `json:"max_active_positions"`
+		MinScore           float64 `json:"min_score"`
+		TrailingPct        float64 `json:"trailing_pct"`
+		CheckInterval      string  `json:"check_interval"`
 	} `json:"execution"`
 	Concurrency int    `json:"concurrency"`
 	HTTPTimeout string `json:"http_timeout"`
@@ -82,7 +86,6 @@ type rawConfig struct {
 	} `json:"output"`
 }
 
-// Load загружает и валидирует конфигурационный файл формата JSON
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -104,7 +107,6 @@ func Load(path string) (Config, error) {
 		Output:      raw.Output,
 	}
 
-	// Парсинг временных текстовых интервалов в time.Duration
 	cfg.HTTPTimeout, err = time.ParseDuration(raw.HTTPTimeout)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid http_timeout: %w", err)
@@ -120,7 +122,6 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("invalid retry_delay: %w", err)
 	}
 
-	// Дефолтные значения и строгая валидация критичных границ
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 4
 	}
@@ -129,6 +130,12 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Filters.TopCandidates <= 0 {
 		cfg.Filters.TopCandidates = 20
+	}
+	if cfg.Execution.MaxTotalMarginUSD <= 0 {
+		cfg.Execution.MaxTotalMarginUSD = 20.0
+	}
+	if cfg.Execution.MaxActivePositions <= 0 {
+		cfg.Execution.MaxActivePositions = 3
 	}
 
 	return cfg, nil

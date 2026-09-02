@@ -14,6 +14,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,33 +22,38 @@ import (
 )
 
 type Engine struct {
-	cfg               models.BotConfig
-	client            *http.Client
-	baseURL           string
-	mu                sync.Mutex
-	positions         map[string]*models.PositionState
-	cooldowns         map[string]time.Time
-	disabledTokens    map[string]bool
-	maxTotalMarginUSD float64
-	cachedBalance     float64
-	lastBalanceCheck  time.Time
-	wsEngine          *WSEngine
+	cfg              models.BotConfig
+	client           *http.Client
+	baseURL          string
+	mu               sync.Mutex
+	positions        map[string]*models.PositionState
+	cooldowns        map[string]time.Time
+	disabledTokens   map[string]bool
+	cachedBalance    float64
+	lastBalanceCheck time.Time
+	wsEngine         *WSEngine
+	targetSide       string
 }
 
-func NewEngine(cfg models.BotConfig) *Engine {
+func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 	baseURL := "https://api.bybit.com"
 	if cfg.Testnet {
 		baseURL = "https://api-testnet.bybit.com"
 	}
 
+	targetSide := "Sell"
+	if strings.ToLower(strategy) == "long" {
+		targetSide = "Buy"
+	}
+
 	e := &Engine{
-		cfg:               cfg,
-		client:            &http.Client{Timeout: 10 * time.Second},
-		baseURL:           baseURL,
-		positions:         make(map[string]*models.PositionState),
-		cooldowns:         make(map[string]time.Time),
-		disabledTokens:    make(map[string]bool),
-		maxTotalMarginUSD: 40.0,
+		cfg:            cfg,
+		client:         &http.Client{Timeout: 15 * time.Second},
+		baseURL:        baseURL,
+		positions:      make(map[string]*models.PositionState),
+		cooldowns:      make(map[string]time.Time),
+		disabledTokens: make(map[string]bool),
+		targetSide:     targetSide,
 	}
 
 	e.wsEngine = NewWSEngine(cfg.ApiKey, cfg.ApiSecret, cfg.Testnet, e.handlePositionClosedWS)
@@ -83,7 +89,7 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 		return nil
 	}
 
-	bal, err := e.fetchWalletBalanceUniversal(ctx)
+	bal, err := e.fetchWalletBalance(ctx)
 	if err != nil {
 		return err
 	}
@@ -95,16 +101,18 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 }
 
 func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
-	// Подписка на публичный тикер в WS
 	_ = e.wsEngine.SubscribeTicker(c.Symbol)
 
-	e.mu.Lock()
-	currentUsedMargin := float64(len(e.positions)) * e.cfg.MarginPerTradeUSD
-	if currentUsedMargin+e.cfg.MarginPerTradeUSD > e.maxTotalMarginUSD {
-		e.mu.Unlock()
+	side := "Sell"
+	if strings.ToLower(targetStrategy) == "long" {
+		side = "Buy"
+	}
+
+	if side != e.targetSide {
 		return nil
 	}
 
+	e.mu.Lock()
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
 		return nil
@@ -123,28 +131,48 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		delete(e.cooldowns, c.Symbol)
 	}
 
+	sidePositionsCount := 0
+	for _, pos := range e.positions {
+		if pos.Side == e.targetSide || pos.Side == "PENDING" {
+			sidePositionsCount++
+		}
+	}
+
+	if sidePositionsCount >= e.cfg.MaxActivePositions {
+		e.mu.Unlock()
+		return nil
+	}
+
 	requiredMarginWithBuffer := e.cfg.MarginPerTradeUSD * 1.05
 	if e.cachedBalance < requiredMarginWithBuffer {
 		e.mu.Unlock()
 		return fmt.Errorf("insufficient balance: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
 	}
+
+	// Атомарное виртуальное зарезервирование слота и маржи
+	e.cachedBalance -= e.cfg.MarginPerTradeUSD
+	e.positions[c.Symbol] = &models.PositionState{
+		Symbol:   c.Symbol,
+		Side:     "PENDING",
+		OpenedAt: time.Now().UTC(),
+	}
 	e.mu.Unlock()
+
+	orderPlaced := false
+	defer func() {
+		if !orderPlaced {
+			e.mu.Lock()
+			delete(e.positions, c.Symbol)
+			e.cachedBalance += e.cfg.MarginPerTradeUSD
+			e.mu.Unlock()
+		}
+	}()
 
 	res, ok := c.Strategies[targetStrategy]
 	if !ok || res.Score < e.cfg.MinScore || res.Status == "reject" {
 		return nil
 	}
 
-	side := ""
-	if targetStrategy == "long" {
-		side = "Buy"
-	} else if targetStrategy == "short" {
-		side = "Sell"
-	} else {
-		return nil
-	}
-
-	// 1. Извлечение цены из WS с фоллбэком на REST
 	currentPrice := 0.0
 	bidPrice, askPrice, _, err := e.getLiveTicker(ctx, c.Symbol)
 	if err != nil {
@@ -198,7 +226,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	}
 	slPrice = RoundToStep(slPrice, tickSize)
 
-	if !ValidateStopLoss(side, currentPrice, slPrice, 1.2) {
+	if !ValidateStopLoss(side, currentPrice, slPrice, 2.5) {
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
@@ -229,6 +257,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("order execution failed for %s: %w", c.Symbol, err)
 	}
 
+	orderPlaced = true
+
 	log.Printf("[SUCCESS] Position opened: %s %s | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
 		c.Symbol, side, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
 
@@ -251,13 +281,12 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, currentPrice float64) {
 	e.mu.Lock()
 	pos, active := e.positions[symbol]
-	if !active {
+	if !active || pos.Side == "PENDING" || pos.Side != e.targetSide {
 		e.mu.Unlock()
 		return
 	}
 	e.mu.Unlock()
 
-	// Использование WebSocket-цены в реальном времени, если доступна
 	if wsPrice, ok := e.wsEngine.GetLatestPrice(symbol); ok && wsPrice > 0 {
 		currentPrice = wsPrice
 	}
@@ -271,6 +300,11 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 		return
 	}
 
+	_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
+	if err != nil {
+		tickSize = 0.0001
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -280,8 +314,8 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	if pos.Side == "Buy" {
 		if currentPrice > pos.HighestPrice {
 			pos.HighestPrice = currentPrice
-			newSL := currentPrice * (1 - (e.cfg.TrailingPct / 100))
-			if newSL > pos.StopLoss {
+			newSL := RoundToStep(currentPrice*(1-(e.cfg.TrailingPct/100)), tickSize)
+			if newSL > pos.StopLoss && math.Abs(newSL-pos.StopLoss) >= tickSize {
 				pos.StopLoss = newSL
 				updatedSL = newSL
 				shouldUpdate = true
@@ -290,8 +324,8 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	} else if pos.Side == "Sell" {
 		if currentPrice < pos.LowestPrice || pos.LowestPrice == 0 {
 			pos.LowestPrice = currentPrice
-			newSL := currentPrice * (1 + (e.cfg.TrailingPct / 100))
-			if pos.StopLoss == 0 || newSL < pos.StopLoss {
+			newSL := RoundToStep(currentPrice*(1+(e.cfg.TrailingPct/100)), tickSize)
+			if (pos.StopLoss == 0 || newSL < pos.StopLoss) && math.Abs(newSL-pos.StopLoss) >= tickSize {
 				pos.StopLoss = newSL
 				updatedSL = newSL
 				shouldUpdate = true
@@ -324,6 +358,7 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 				Size          string `json:"size"`
 				AvgPrice      string `json:"avgPrice"`
 				UnrealisedPnl string `json:"unrealisedPnl"`
+				StopLoss      string `json:"stopLoss"`
 			} `json:"list"`
 		} `json:"result"`
 	}
@@ -332,77 +367,113 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 		return
 	}
 
-	activeCount := 0
-	totalUnrealizedPnL := 0.0
+	exchangeActive := make(map[string]bool)
+	targetSideCount := 0
+	totalSideUnrealizedPnL := 0.0
 
+	e.mu.Lock()
 	for _, pos := range res.Result.List {
 		size, _ := strconv.ParseFloat(pos.Size, 64)
 		if size > 0 {
-			activeCount++
 			pnl, _ := strconv.ParseFloat(pos.UnrealisedPnl, 64)
-			totalUnrealizedPnL += pnl
-			log.Printf("[POS MONITOR] %s %s | Size: %s | Entry: %s | uPnL: %.4f USDT",
-				pos.Symbol, pos.Side, pos.Size, pos.AvgPrice, pnl)
-		}
-	}
+			avgPrice, _ := strconv.ParseFloat(pos.AvgPrice, 64)
+			currentSL, _ := strconv.ParseFloat(pos.StopLoss, 64)
 
-	if activeCount > 0 {
-		log.Printf("[SUMMARY] Active Positions: %d | Total uPnL: %.4f USDT", activeCount, totalUnrealizedPnL)
-	}
-}
+			if pos.Side == e.targetSide {
+				exchangeActive[pos.Symbol] = true
+				targetSideCount++
+				totalSideUnrealizedPnL += pnl
 
-func (e *Engine) fetchWalletBalanceUniversal(ctx context.Context) (float64, error) {
-	accountTypes := []string{"UNIFIED", "CONTRACT", "SPOT", "FUND"}
-	var lastAPIError string
-
-	for _, accType := range accountTypes {
-		path := "/v5/account/wallet-balance"
-		queryString := fmt.Sprintf("accountType=%s", accType)
-
-		body, err := e.doSignedGET(ctx, path, queryString)
-		if err != nil {
-			lastAPIError = fmt.Sprintf("HTTP error on %s: %v", accType, err)
-			continue
-		}
-
-		var res struct {
-			RetCode int    `json:"retCode"`
-			RetMsg  string `json:"retMsg"`
-			Result  struct {
-				List []struct {
-					Coin []struct {
-						Coin                string `json:"coin"`
-						AvailableToWithdraw string `json:"availableToWithdraw"`
-						WalletBalance       string `json:"walletBalance"`
-						Equity              string `json:"equity"`
-					} `json:"coin"`
-				} `json:"list"`
-			} `json:"result"`
-		}
-
-		if err := json.Unmarshal(body, &res); err != nil || res.RetCode != 0 || len(res.Result.List) == 0 {
-			continue
-		}
-
-		for _, coin := range res.Result.List[0].Coin {
-			if coin.Coin == "USDT" {
-				if coin.AvailableToWithdraw != "" {
-					bal, err := strconv.ParseFloat(coin.AvailableToWithdraw, 64)
-					if err == nil && bal >= 0 {
-						return bal, nil
+				if state, exists := e.positions[pos.Symbol]; !exists || state.Side == "PENDING" {
+					e.positions[pos.Symbol] = &models.PositionState{
+						Symbol:       pos.Symbol,
+						Side:         pos.Side,
+						EntryPrice:   avgPrice,
+						Size:         size,
+						StopLoss:     currentSL,
+						HighestPrice: avgPrice,
+						LowestPrice:  avgPrice,
+						OpenedAt:     time.Now().UTC(),
+					}
+				} else {
+					if currentSL > 0 {
+						state.StopLoss = currentSL
 					}
 				}
-				if coin.WalletBalance != "" {
-					bal, err := strconv.ParseFloat(coin.WalletBalance, 64)
-					if err == nil && bal >= 0 {
-						return bal, nil
-					}
+
+				log.Printf("[POS MONITOR] %s %s | Size: %s | Entry: %s | uPnL: %.4f USDT",
+					pos.Symbol, pos.Side, pos.Size, pos.AvgPrice, pnl)
+			}
+		}
+	}
+
+	for sym, pos := range e.positions {
+		if pos.Side != "PENDING" && pos.Side == e.targetSide && !exchangeActive[sym] {
+			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state", sym)
+			delete(e.positions, sym)
+			e.cooldowns[sym] = time.Now().Add(15 * time.Minute)
+		}
+	}
+	balance := e.cachedBalance
+	e.mu.Unlock()
+
+	log.Printf("[SUMMARY] Strategy Target: %s | Active Positions: %d/%d | Wallet Balance: %.2f USDT | Target uPnL: %.4f USDT",
+		e.targetSide, targetSideCount, e.cfg.MaxActivePositions, balance, totalSideUnrealizedPnL)
+}
+
+func (e *Engine) fetchWalletBalance(ctx context.Context) (float64, error) {
+	path := "/v5/account/wallet-balance"
+	queryString := "accountType=UNIFIED"
+
+	body, err := e.doSignedGET(ctx, path, queryString)
+	if err != nil {
+		return 0, fmt.Errorf("wallet balance fetch failed: %w", err)
+	}
+
+	var res struct {
+		RetCode int    `json:"retCode"`
+		RetMsg  string `json:"retMsg"`
+		Result  struct {
+			List []struct {
+				Coin []struct {
+					Coin                string `json:"coin"`
+					AvailableToWithdraw string `json:"availableToWithdraw"`
+					WalletBalance       string `json:"walletBalance"`
+				} `json:"coin"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &res); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal balance JSON: %w", err)
+	}
+
+	if res.RetCode != 0 {
+		return 0, fmt.Errorf("bybit balance api error code=%d msg=%s", res.RetCode, res.RetMsg)
+	}
+
+	if len(res.Result.List) == 0 {
+		return 0.0, nil
+	}
+
+	for _, coin := range res.Result.List[0].Coin {
+		if coin.Coin == "USDT" {
+			if coin.AvailableToWithdraw != "" {
+				bal, err := strconv.ParseFloat(coin.AvailableToWithdraw, 64)
+				if err == nil && bal >= 0 {
+					return bal, nil
+				}
+			}
+			if coin.WalletBalance != "" {
+				bal, err := strconv.ParseFloat(coin.WalletBalance, 64)
+				if err == nil && bal >= 0 {
+					return bal, nil
 				}
 			}
 		}
 	}
 
-	return 0.0, fmt.Errorf("unable to read USDT balance. Last API Diagnostic: %s", lastAPIError)
+	return 0.0, nil
 }
 
 func (e *Engine) getLiveTicker(ctx context.Context, symbol string) (bid, ask, last float64, err error) {
@@ -574,6 +645,7 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
+		"symbol":      symbol,
 		"stopLoss":    strconv.FormatFloat(sl, 'f', 4, 64),
 		"positionIdx": 0,
 	}

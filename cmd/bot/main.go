@@ -51,23 +51,35 @@ func main() {
 	}
 
 	botCfg := models.BotConfig{
-		ApiKey:            apiKey,
-		ApiSecret:         apiSecret,
-		Testnet:           cfg.Execution.Testnet,
-		MaxLeverage:       cfg.Execution.MaxLeverage,
-		MarginPerTradeUSD: cfg.Execution.MarginPerTradeUSD,
-		MinScore:          cfg.Execution.MinScore,
-		TrailingPct:       cfg.Execution.TrailingPct,
-		CheckInterval:     checkInterval,
+		ApiKey:             apiKey,
+		ApiSecret:          apiSecret,
+		Testnet:            cfg.Execution.Testnet,
+		MaxLeverage:        cfg.Execution.MaxLeverage,
+		MarginPerTradeUSD:  cfg.Execution.MarginPerTradeUSD,
+		MaxTotalMarginUSD:  cfg.Execution.MaxTotalMarginUSD,
+		MaxActivePositions: cfg.Execution.MaxActivePositions,
+		MinScore:           cfg.Execution.MinScore,
+		TrailingPct:        cfg.Execution.TrailingPct,
+		CheckInterval:      checkInterval,
 	}
 
-	engine := execution.NewEngine(botCfg)
+	engine := execution.NewEngine(botCfg, *strategyName)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 
-	log.Printf("[INFO] Engine Active. Target Strategy: %s | Margin: $%.2f | Leverage: x%d | Testnet: %v",
-		*strategyName, botCfg.MarginPerTradeUSD, botCfg.MaxLeverage, botCfg.Testnet)
+	if err := engine.InitWebSocket(ctx); err != nil {
+		log.Printf("[WARN] WebSocket initialization warning: %v", err)
+	}
+
+	// Обязательная вычитка позиции ДО цикла
+	if err := engine.RefreshBalance(ctx); err != nil {
+		log.Printf("[ERROR] Initial balance refresh failed: %v", err)
+	}
+	engine.LogActivePositions(ctx)
+
+	log.Printf("[INFO] Engine Active. Strategy: %s | Margin/Trade: $%.2f | MaxMargin: $%.2f | MaxPos: %d | Leverage: x%d | Testnet: %v",
+		*strategyName, botCfg.MarginPerTradeUSD, botCfg.MaxTotalMarginUSD, botCfg.MaxActivePositions, botCfg.MaxLeverage, botCfg.Testnet)
 
 	ticker := time.NewTicker(botCfg.CheckInterval)
 	defer ticker.Stop()

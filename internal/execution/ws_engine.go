@@ -27,6 +27,7 @@ type WSEngine struct {
 	pubConn     *websocket.Conn
 	privConn    *websocket.Conn
 	pubConnMu   sync.Mutex
+	privConnMu  sync.Mutex // Строгая защита синхронизации записи TLS-кадров
 	onClosedPos func(symbol string)
 }
 
@@ -152,7 +153,10 @@ func (ws *WSEngine) StartPrivateStream(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("private ws dial failed: %w", err)
 	}
+
+	ws.privConnMu.Lock()
 	ws.privConn = conn
+	ws.privConnMu.Unlock()
 
 	expires := time.Now().UnixMilli() + 10000
 	sig := generatePrivateWSSignature(ws.apiKey, ws.apiSecret, expires)
@@ -162,7 +166,11 @@ func (ws *WSEngine) StartPrivateStream(ctx context.Context) error {
 		"args": []interface{}{ws.apiKey, expires, sig},
 	}
 
-	if err := conn.WriteJSON(authPayload); err != nil {
+	ws.privConnMu.Lock()
+	err = conn.WriteJSON(authPayload)
+	ws.privConnMu.Unlock()
+
+	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("private ws auth send failed: %w", err)
 	}
@@ -172,12 +180,17 @@ func (ws *WSEngine) StartPrivateStream(ctx context.Context) error {
 		"args": []string{"position"},
 	}
 
-	if err := conn.WriteJSON(subPayload); err != nil {
+	ws.privConnMu.Lock()
+	err = conn.WriteJSON(subPayload)
+	ws.privConnMu.Unlock()
+
+	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("private ws subscribe failed: %w", err)
 	}
 
 	go ws.readPrivateLoop(ctx)
+	go ws.keepAlivePrivate(ctx)
 	return nil
 }
 
@@ -185,17 +198,23 @@ func (ws *WSEngine) readPrivateLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			ws.privConnMu.Lock()
 			if ws.privConn != nil {
 				_ = ws.privConn.Close()
 			}
+			ws.privConnMu.Unlock()
 			return
 		default:
-			if ws.privConn == nil {
+			ws.privConnMu.Lock()
+			conn := ws.privConn
+			ws.privConnMu.Unlock()
+
+			if conn == nil {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 
-			_, message, err := ws.privConn.ReadMessage()
+			_, message, err := conn.ReadMessage()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -224,6 +243,24 @@ func (ws *WSEngine) readPrivateLoop(ctx context.Context) {
 					}
 				}
 			}
+		}
+	}
+}
+
+func (ws *WSEngine) keepAlivePrivate(ctx context.Context) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ws.privConnMu.Lock()
+			if ws.privConn != nil {
+				_ = ws.privConn.WriteJSON(map[string]string{"op": "ping"})
+			}
+			ws.privConnMu.Unlock()
 		}
 	}
 }
