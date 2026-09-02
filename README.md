@@ -42,6 +42,11 @@ go build -ldflags="-s -w" -o bot ./cmd/bot
 ```
 
 ## 2. Управление Торговыми Ботами (bot-long и bot-short)
+Перепрочесть настройки автоматики
+```bash
+systemctl daemon-reload
+```
+
 Проверка статуса
 
 ```bash
