@@ -25,7 +25,6 @@ func main() {
 	inputFile := flag.String("input", "long-screening.json", "path to input screening result JSON")
 	flag.Parse()
 
-	// Настройка логгера напрямую в os.Stdout без буферизации
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 
@@ -67,7 +66,6 @@ func main() {
 
 	engine := execution.NewEngine(botCfg, *strategyName)
 
-	// Исключен SIGHUP, вызывавший ложное завершение под systemd
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -75,7 +73,7 @@ func main() {
 		log.Printf("[WARN] WebSocket initialization warning: %v", err)
 	}
 
-	// Синхронизация состояния с биржей до запуска цикла
+	// Первичная разовая вычитка баланса и позиций при холодно-стартовом вызове
 	if err := engine.RefreshBalance(ctx); err != nil {
 		log.Printf("[ERROR] Initial balance refresh failed: %v", err)
 	}
@@ -105,11 +103,7 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 		return
 	}
 
-	if err := engine.RefreshBalance(ctx); err != nil {
-		log.Printf("[ERROR] Balance refresh failed: %v", err)
-		return
-	}
-
+	// Вызов RefreshBalance здесь УБРАН: обновление идет исключительно по WebSocket Push от Bybit
 	engine.LogActivePositions(ctx)
 
 	data, err := os.ReadFile(filePath)

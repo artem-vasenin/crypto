@@ -29,7 +29,7 @@ type Engine struct {
 	positions        map[string]*models.PositionState
 	cooldowns        map[string]time.Time
 	disabledTokens   map[string]bool
-	leverageSetCache map[string]bool // Кеш для исключения повторных вызовов setLeverage
+	leverageSetCache map[string]bool
 	cachedBalance    float64
 	lastBalanceCheck time.Time
 	wsEngine         *WSEngine
@@ -58,8 +58,16 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		targetSide:       targetSide,
 	}
 
-	e.wsEngine = NewWSEngine(cfg.ApiKey, cfg.ApiSecret, cfg.Testnet, e.handlePositionClosedWS)
+	e.wsEngine = NewWSEngine(cfg.ApiKey, cfg.ApiSecret, cfg.Testnet, e.handlePositionClosedWS, e.handleBalanceUpdateWS)
 	return e
+}
+
+func (e *Engine) handleBalanceUpdateWS(balance float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cachedBalance = balance
+	e.lastBalanceCheck = time.Now()
+	log.Printf("[WS BALANCE] Push update: Available USDT: %.2f USD", balance)
 }
 
 func (e *Engine) InitWebSocket(ctx context.Context) error {
@@ -87,10 +95,6 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if time.Since(e.lastBalanceCheck) < 5*time.Second && e.lastBalanceCheck.After(time.Time{}) {
-		return nil
-	}
-
 	bal, err := e.fetchWalletBalance(ctx)
 	if err != nil {
 		return err
@@ -98,7 +102,7 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 
 	e.cachedBalance = bal
 	e.lastBalanceCheck = time.Now()
-	log.Printf("[BALANCE] Wallet USDT Available: %.2f USD", bal)
+	log.Printf("[BALANCE REST] Wallet USDT Available: %.2f USD", bal)
 	return nil
 }
 
@@ -151,7 +155,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("insufficient balance: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
 	}
 
-	// Виртуальное бронирование слота и маржи
 	e.cachedBalance -= e.cfg.MarginPerTradeUSD
 	e.positions[c.Symbol] = &models.PositionState{
 		Symbol:   c.Symbol,
@@ -166,7 +169,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 			e.mu.Lock()
 			delete(e.positions, c.Symbol)
 			e.cachedBalance += e.cfg.MarginPerTradeUSD
-			// При любых ошибках исполнение активирует 5-минутный кулдаун тикера, дабы не спамить API
 			e.cooldowns[c.Symbol] = time.Now().Add(5 * time.Minute)
 			e.mu.Unlock()
 		}
@@ -204,7 +206,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	// Первичный расчет и жесткий фильтр по рискам SL ДО обращения к настройкам плеча
 	slDist := currentPrice * 0.020
 	slPrice := 0.0
 
@@ -230,7 +231,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
 	}
 
-	// Оптимизация Rate Limit: вызов setLeverage и setTradeModeIsolated ТОЛЬКО один раз за сессию
 	e.mu.Lock()
 	isLeverageSet := e.leverageSetCache[c.Symbol]
 	e.mu.Unlock()
