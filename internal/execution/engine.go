@@ -29,6 +29,7 @@ type Engine struct {
 	positions        map[string]*models.PositionState
 	cooldowns        map[string]time.Time
 	disabledTokens   map[string]bool
+	leverageSetCache map[string]bool // Кеш для исключения повторных вызовов setLeverage
 	cachedBalance    float64
 	lastBalanceCheck time.Time
 	wsEngine         *WSEngine
@@ -47,13 +48,14 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 	}
 
 	e := &Engine{
-		cfg:            cfg,
-		client:         &http.Client{Timeout: 15 * time.Second},
-		baseURL:        baseURL,
-		positions:      make(map[string]*models.PositionState),
-		cooldowns:      make(map[string]time.Time),
-		disabledTokens: make(map[string]bool),
-		targetSide:     targetSide,
+		cfg:              cfg,
+		client:           &http.Client{Timeout: 10 * time.Second},
+		baseURL:          baseURL,
+		positions:        make(map[string]*models.PositionState),
+		cooldowns:        make(map[string]time.Time),
+		disabledTokens:   make(map[string]bool),
+		leverageSetCache: make(map[string]bool),
+		targetSide:       targetSide,
 	}
 
 	e.wsEngine = NewWSEngine(cfg.ApiKey, cfg.ApiSecret, cfg.Testnet, e.handlePositionClosedWS)
@@ -75,7 +77,7 @@ func (e *Engine) handlePositionClosedWS(symbol string) {
 	defer e.mu.Unlock()
 
 	if _, active := e.positions[symbol]; active {
-		log.Printf("[CLEANUP WS] Push notification: Position %s closed on exchange. Activating 15m Cooldown.", symbol)
+		log.Printf("[CLEANUP WS] Position %s closed on exchange. Activating 15m Cooldown.", symbol)
 		delete(e.positions, symbol)
 		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
 	}
@@ -149,7 +151,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("insufficient balance: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
 	}
 
-	// Атомарное виртуальное зарезервирование слота и маржи
+	// Виртуальное бронирование слота и маржи
 	e.cachedBalance -= e.cfg.MarginPerTradeUSD
 	e.positions[c.Symbol] = &models.PositionState{
 		Symbol:   c.Symbol,
@@ -164,6 +166,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 			e.mu.Lock()
 			delete(e.positions, c.Symbol)
 			e.cachedBalance += e.cfg.MarginPerTradeUSD
+			// При любых ошибках исполнение активирует 5-минутный кулдаун тикера, дабы не спамить API
+			e.cooldowns[c.Symbol] = time.Now().Add(5 * time.Minute)
 			e.mu.Unlock()
 		}
 	}()
@@ -200,16 +204,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, currentPrice, qtyStep, minQty, minNotional)
-	if qty <= 0 {
-		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
-	}
-
-	_ = e.setTradeModeIsolated(ctx, c.Symbol)
-	if err := e.setLeverage(ctx, c.Symbol, e.cfg.MaxLeverage); err != nil {
-		log.Printf("[WARN] Set leverage for %s: %v", c.Symbol, err)
-	}
-
+	// Первичный расчет и жесткий фильтр по рискам SL ДО обращения к настройкам плеча
 	slDist := currentPrice * 0.020
 	slPrice := 0.0
 
@@ -228,6 +223,27 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 
 	if !ValidateStopLoss(side, currentPrice, slPrice, 2.5) {
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
+	}
+
+	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, currentPrice, qtyStep, minQty, minNotional)
+	if qty <= 0 {
+		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
+	}
+
+	// Оптимизация Rate Limit: вызов setLeverage и setTradeModeIsolated ТОЛЬКО один раз за сессию
+	e.mu.Lock()
+	isLeverageSet := e.leverageSetCache[c.Symbol]
+	e.mu.Unlock()
+
+	if !isLeverageSet {
+		_ = e.setTradeModeIsolated(ctx, c.Symbol)
+		if err := e.setLeverage(ctx, c.Symbol, e.cfg.MaxLeverage); err != nil {
+			log.Printf("[WARN] Set leverage for %s: %v", c.Symbol, err)
+		} else {
+			e.mu.Lock()
+			e.leverageSetCache[c.Symbol] = true
+			e.mu.Unlock()
+		}
 	}
 
 	actualRiskDist := math.Abs(currentPrice - slPrice)
