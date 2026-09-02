@@ -25,6 +25,8 @@ func main() {
 	inputFile := flag.String("input", "long-screening.json", "path to input screening result JSON")
 	flag.Parse()
 
+	// Настройка логгера напрямую в os.Stdout без буферизации
+	log.SetOutput(os.Stdout)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 
 	if err := godotenv.Load(); err != nil {
@@ -65,14 +67,15 @@ func main() {
 
 	engine := execution.NewEngine(botCfg, *strategyName)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	// Исключен SIGHUP, вызывавший ложное завершение под systemd
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	if err := engine.InitWebSocket(ctx); err != nil {
 		log.Printf("[WARN] WebSocket initialization warning: %v", err)
 	}
 
-	// Обязательная вычитка позиции ДО цикла
+	// Синхронизация состояния с биржей до запуска цикла
 	if err := engine.RefreshBalance(ctx); err != nil {
 		log.Printf("[ERROR] Initial balance refresh failed: %v", err)
 	}
@@ -89,7 +92,7 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[INFO] Interrupt signal received. Closing network connections and shutting down...")
+			log.Println("[INFO] Shutdown signal received. Closing connections...")
 			return
 		case <-ticker.C:
 			processIteration(ctx, engine, *inputFile, *strategyName, cfg.Concurrency)
