@@ -83,30 +83,30 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	entryPrice := 0.0
-	posSide := e.targetSide
-
-	if pos, exists := e.positions[exec.Symbol]; exists && pos.EntryPrice > 0 {
-		entryPrice = pos.EntryPrice
-		posSide = pos.Side
-	} else if posHist, existsHist := e.closedHistory[exec.Symbol]; existsHist && posHist.EntryPrice > 0 {
-		entryPrice = posHist.EntryPrice
-		posSide = posHist.Side
+	pos, exists := e.positions[exec.Symbol]
+	if !exists {
+		return // Игнорируем исполнения, если позиции нет в локальном стейте
 	}
 
-	estimatedPnL := 0.0
-	if entryPrice > 0 {
-		if posSide == "Buy" {
-			estimatedPnL = (exec.ExecPrice - entryPrice) * exec.ClosedSize
-		} else if posSide == "Sell" {
-			estimatedPnL = (entryPrice - exec.ExecPrice) * exec.ClosedSize
-		}
+	entryPrice := pos.EntryPrice
+	if entryPrice <= 0 {
+		return
 	}
 
-	netPnL := estimatedPnL - exec.ExecFee
+	netPnL := 0.0
+	if pos.Side == "Buy" {
+		netPnL = (exec.ExecPrice-entryPrice)*exec.ClosedSize - exec.ExecFee
+	} else if pos.Side == "Sell" {
+		netPnL = (entryPrice-exec.ExecPrice)*exec.ClosedSize - exec.ExecFee
+	}
 
-	log.Printf("[TRADE CLOSED] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Net PnL: %.4f USDT | ExecType: %s | OrderType: %s",
-		exec.Symbol, exec.Side, exec.ClosedSize, entryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType, exec.OrderType)
+	log.Printf("[TRADE CLOSED WS] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Net PnL: %.4f USDT | ExecType: %s",
+		exec.Symbol, pos.Side, exec.ClosedSize, entryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType)
+
+	// Удаляем позицию из памяти ТОЛЬКО когда она полностью закрыта
+	e.closedHistory[exec.Symbol] = pos
+	delete(e.positions, exec.Symbol)
+	e.cooldowns[exec.Symbol] = time.Now().Add(30 * time.Minute)
 }
 
 func (e *Engine) InitWebSocket(ctx context.Context) error {
@@ -148,7 +148,9 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 
 func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	path := "/v5/position/closed-pnl"
-	queryString := "category=linear&limit=10"
+	// Берем только свежие закрытия за последние 15 минут
+	startTime := time.Now().Add(-15 * time.Minute).UnixMilli()
+	queryString := fmt.Sprintf("category=linear&limit=10&startTime=%d", startTime)
 
 	body, err := e.doSignedGET(ctx, path, queryString)
 	if err != nil {
@@ -160,12 +162,13 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 		Result  struct {
 			List []struct {
 				Symbol        string `json:"symbol"`
-				Side          string `json:"side"`
+				OrderSide     string `json:"orderSide"`
 				ClosedPnl     string `json:"closedPnl"`
 				AvgEntryPrice string `json:"avgEntryPrice"`
 				AvgExitPrice  string `json:"avgExitPrice"`
 				ClosedSize    string `json:"closedSize"`
 				ExecType      string `json:"execType"`
+				CreatedTime   string `json:"createdTime"`
 			} `json:"list"`
 		} `json:"result"`
 	}
@@ -178,19 +181,23 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	defer e.mu.Unlock()
 
 	for _, item := range res.Result.List {
-		if pos, exists := e.positions[item.Symbol]; exists && pos.Side == e.targetSide {
-			pnl, _ := strconv.ParseFloat(item.ClosedPnl, 64)
-			entry, _ := strconv.ParseFloat(item.AvgEntryPrice, 64)
-			exit, _ := strconv.ParseFloat(item.AvgExitPrice, 64)
-			size, _ := strconv.ParseFloat(item.ClosedSize, 64)
-
-			log.Printf("[TRADE CLOSED REST RESTORE] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Net PnL: %.4f USDT | ExecType: %s",
-				item.Symbol, item.Side, size, entry, exit, pnl, item.ExecType)
-
-			e.closedHistory[item.Symbol] = pos
-			delete(e.positions, item.Symbol)
-			e.cooldowns[item.Symbol] = time.Now().Add(30 * time.Minute)
+		// Восстанавливаем ТОЛЬКО если позиция есть в e.positions
+		pos, exists := e.positions[item.Symbol]
+		if !exists {
+			continue
 		}
+
+		pnl, _ := strconv.ParseFloat(item.ClosedPnl, 64) // Bybit уже отдал чистый PnL
+		entry, _ := strconv.ParseFloat(item.AvgEntryPrice, 64)
+		exit, _ := strconv.ParseFloat(item.AvgExitPrice, 64)
+		size, _ := strconv.ParseFloat(item.ClosedSize, 64)
+
+		log.Printf("[TRADE CLOSED REST RESTORE] %s | Qty: %.4f | Entry: %.4f | Exit: %.4f | Net PnL: %.4f USDT | ExecType: %s",
+			item.Symbol, size, entry, exit, pnl, item.ExecType)
+
+		e.closedHistory[item.Symbol] = pos
+		delete(e.positions, item.Symbol) // Атомарно удаляем, чтобы не было повтора в следующую минуту
+		e.cooldowns[item.Symbol] = time.Now().Add(30 * time.Minute)
 	}
 }
 
