@@ -12,7 +12,7 @@ build:
 
 deploy:
 	@echo "[DEPLOY] Pulling latest code..."
-	git pull origin main
+	git pull origin sail-both-v1
 	@make build
 	@echo "[DEPLOY] Compilation successful. Swapping binaries and restarting services..."
 	sudo systemctl stop $(SERVICES)
