@@ -4,10 +4,10 @@
   },
   "filters": {
     "max_price": 50.0,
-    "min_turnover_24h": 3000000.0,
+    "min_turnover_24h": 5000000.0,
     "preselect_candidates": 60,
     "top_candidates": 20,
-    "max_grid_spread_pct": 0.10
+    "max_grid_spread_pct": 0.08
   },
   "analysis": {
     "kline_limit_15m": 300,
