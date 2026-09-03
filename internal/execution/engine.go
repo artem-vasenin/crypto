@@ -409,7 +409,57 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	}
 }
 
+func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
+	path := "/v5/position/closed-pnl"
+	queryString := "category=linear&limit=10"
+
+	body, err := e.doSignedGET(ctx, path, queryString)
+	if err != nil {
+		return
+	}
+
+	var res struct {
+		RetCode int `json:"retCode"`
+		Result  struct {
+			List []struct {
+				Symbol        string `json:"symbol"`
+				Side          string `json:"side"`
+				ClosedPnl     string `json:"closedPnl"`
+				AvgEntryPrice string `json:"avgEntryPrice"`
+				AvgExitPrice  string `json:"avgExitPrice"`
+				ClosedSize    string `json:"closedSize"`
+				ExecType      string `json:"execType"`
+				CreatedTime   string `json:"createdTime"`
+			} `json:"list"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &res); err != nil || res.RetCode != 0 {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, item := range res.Result.List {
+		if pos, exists := e.positions[item.Symbol]; exists && pos.Side == e.targetSide {
+			pnl, _ := strconv.ParseFloat(item.ClosedPnl, 64)
+			entry, _ := strconv.ParseFloat(item.AvgEntryPrice, 64)
+			exit, _ := strconv.ParseFloat(item.AvgExitPrice, 64)
+			size, _ := strconv.ParseFloat(item.ClosedSize, 64)
+
+			log.Printf("[TRADE CLOSED REST RESTORE] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Net PnL: %.4f USDT | ExecType: %s",
+				item.Symbol, item.Side, size, entry, exit, pnl, item.ExecType)
+
+			e.closedHistory[item.Symbol] = pos
+			delete(e.positions, item.Symbol)
+			e.cooldowns[item.Symbol] = time.Now().Add(30 * time.Minute)
+		}
+	}
+}
+
 func (e *Engine) LogActivePositions(ctx context.Context) {
+	e.syncClosedPositionsREST(ctx)
 	path := "/v5/position/list"
 	queryString := "category=linear&settleCoin=USDT"
 
