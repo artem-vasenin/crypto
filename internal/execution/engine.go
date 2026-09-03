@@ -85,9 +85,10 @@ func (e *Engine) handlePositionClosedWS(symbol string) {
 	defer e.mu.Unlock()
 
 	if _, active := e.positions[symbol]; active {
-		log.Printf("[CLEANUP WS] Position %s closed on exchange. Activating 15m Cooldown.", symbol)
+		log.Printf("[CLEANUP WS] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
 		delete(e.positions, symbol)
-		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
+		// Увеличен кулдаун до 30 минут для предотвращения частого перезахода (Over-trading)
+		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
 	}
 }
 
@@ -206,17 +207,18 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
+	// Валидация геометрии уровня SL с учетом направления позиции
 	slDist := currentPrice * 0.020
 	slPrice := 0.0
 
 	if side == "Buy" {
 		slPrice = currentPrice - slDist
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < slPrice {
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > slPrice {
 			slPrice = c.Levels.NearestSupport
 		}
 	} else {
 		slPrice = currentPrice + slDist
-		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance > slPrice {
+		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < (currentPrice+slDist*1.5) {
 			slPrice = c.Levels.NearestResistance
 		}
 	}
@@ -308,10 +310,10 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	}
 
 	if !e.hasActivePosition(ctx, symbol) {
-		log.Printf("[CLEANUP] Position %s closed on exchange. Activating 15m Cooldown.", symbol)
+		log.Printf("[CLEANUP] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
 		e.mu.Lock()
 		delete(e.positions, symbol)
-		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
+		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
 		e.mu.Unlock()
 		return
 	}
@@ -425,9 +427,9 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 
 	for sym, pos := range e.positions {
 		if pos.Side != "PENDING" && pos.Side == e.targetSide && !exchangeActive[sym] {
-			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state", sym)
+			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state. Activating 30m Post-Trade Cooldown.", sym)
 			delete(e.positions, sym)
-			e.cooldowns[sym] = time.Now().Add(15 * time.Minute)
+			e.cooldowns[sym] = time.Now().Add(30 * time.Minute)
 		}
 	}
 	balance := e.cachedBalance

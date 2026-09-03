@@ -164,3 +164,9 @@ tail -n 100 /opt/trading-bot/logs/long-bot.log
 ```bash
 cd /opt/trading-bot && git pull && go build -ldflags="-s -w" -o screener ./cmd/screener && go build -ldflags="-s -w" -o bot ./cmd/bot && systemctl restart screener-long screener-short bot-long bot-short
 ```
+
+Посмотреть всякие логи
+```bash
+journalctl -u bot-long -u bot-short --since "today" -o cat | grep -E "\[SUCCESS\]|\[TRAILING\]|\[CLEANUP\]"
+journalctl -u bot-short -u bot-long --since "3 minutes ago" -o cat | grep -E "\[ERROR\]|\[WARN\]|\[SUCCESS\]|\[BALANCE\]"
+```
