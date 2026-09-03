@@ -1,0 +1,218 @@
+{
+  "generated_at": "2026-09-03T20:19:31.795302Z",
+  "exchange": "Bybit",
+  "category": "linear",
+  "symbol": "BTCUSDT",
+  "purpose": "Глубокий снимок одной монеты для последующего AI-анализа Long/Short и оценки контекста BTC.",
+  "data_quality": {
+    "one_minute_candles": 1000,
+    "notes": [
+      "Bybit вернул меньше запрошенного объёма 1m истории; lead-lag рассчитан по доступным свечам.",
+      "Для BTCUSDT BTC lead-lag сравнивает инструмент с самим BTC и поэтому не является независимым сигналом."
+    ]
+  },
+  "market": {
+    "price": 81416.9,
+    "change_24h_pct": 5.4126,
+    "change_3d_pct": 3.2886941386318425,
+    "change_7d_pct": 1.5055610758353266,
+    "turnover_24h": 6780883145.6718,
+    "volume_24h": 85482.095,
+    "spread_pct": 0.0001228246224060925
+  },
+  "indicators": {
+    "rsi_15m": 61.16459699548884,
+    "rsi_1h": 81.35235624729783,
+    "rsi_4h": 75.77141195288642,
+    "atr_15m": 298.78571428571223,
+    "atr_1h": 644.7499999999969,
+    "atr_4h": 1075.2285714285701,
+    "atr_1h_pct": -99.20808824703471,
+    "atr_4h_pct": -98.67935456713708,
+    "volume_ratio_1h": 1.463605671057297
+  },
+  "trend": {
+    "ema20_15m": 80946.95325139556,
+    "ema50_15m": 79893.36841202322,
+    "ema200_15m": 78147.72615737627,
+    "ema20_1h": 79501.95897093373,
+    "ema50_1h": 78516.7885699859,
+    "ema200_1h": 78270.61149342664,
+    "ema20_4h": 78715.89222078642,
+    "ema50_4h": 77991.11723859468,
+    "ema200_4h": 72135.50547238628,
+    "price_vs_ema20_1h_pct": 2.4086715017505034,
+    "price_vs_ema50_1h_pct": 3.69361952116658,
+    "price_vs_ema200_1h_pct": 4.019757156027315
+  },
+  "momentum": {
+    "change_1h_pct": -0.36346325410976377,
+    "change_4h_pct": 0.5930545894394346,
+    "change_12h_pct": 4.643457092878123,
+    "change_24h_pct": 5.236973164971892,
+    "roc_1h_pct": -0.36346325410976377,
+    "roc_4h_pct": 0.5930545894394346
+  },
+  "volume": {
+    "volume_5m": 211.44600000000003,
+    "volume_15m": 704.502,
+    "volume_1h": 5140.922999999999,
+    "ratio_5m": 0.4935596195469182,
+    "ratio_15m": 0.54815215088808,
+    "ratio_1h": 1.310904319508453
+  },
+  "structure": {
+    "pivot_highs": [
+      {
+        "time": "2026-09-01T23:00:00Z",
+        "price": 77610.3
+      },
+      {
+        "time": "2026-09-02T03:00:00Z",
+        "price": 77777.9
+      },
+      {
+        "time": "2026-09-02T16:00:00Z",
+        "price": 77548.1
+      },
+      {
+        "time": "2026-09-03T02:00:00Z",
+        "price": 77884.9
+      },
+      {
+        "time": "2026-09-03T07:00:00Z",
+        "price": 78149
+      },
+      {
+        "time": "2026-09-03T15:00:00Z",
+        "price": 81350
+      }
+    ],
+    "pivot_lows": [
+      {
+        "time": "2026-09-01T21:00:00Z",
+        "price": 76859
+      },
+      {
+        "time": "2026-09-02T01:00:00Z",
+        "price": 76680
+      },
+      {
+        "time": "2026-09-02T10:00:00Z",
+        "price": 76199.1
+      },
+      {
+        "time": "2026-09-03T01:00:00Z",
+        "price": 76923
+      },
+      {
+        "time": "2026-09-03T05:00:00Z",
+        "price": 77062.1
+      },
+      {
+        "time": "2026-09-03T10:00:00Z",
+        "price": 77421.2
+      }
+    ],
+    "high_state": "HH",
+    "low_state": "HL",
+    "previous_high": 78149,
+    "current_high": 81350,
+    "previous_low": 77062.1,
+    "current_low": 77421.2
+  },
+  "levels": {
+    "resistance": [],
+    "support": [
+      76900,
+      76859,
+      76680,
+      76364,
+      76199.1
+    ],
+    "nearest_resistance": 0,
+    "nearest_support": 78124.4,
+    "range_width_pct": 7.312816030635516,
+    "range_position_pct": 93.63817454193061,
+    "range_to_atr_1h": 8.642574641333873
+  },
+  "derivatives": {
+    "funding_rate": 0.00008258,
+    "funding_avg": 0.000061721,
+    "funding_avg_24h": 0.000061721,
+    "open_interest": 58609.721,
+    "open_interest_change_pct": -7.577184801609738,
+    "long_ratio": 0.5176,
+    "short_ratio": 0.4824
+  },
+  "order_book": {
+    "bid_notional": 5786538.675900001,
+    "ask_notional": 4457298.8887,
+    "imbalance_pct": 12.975994385087702,
+    "bid_ask_ratio": 1.2982164356466754,
+    "spread_pct": 0.0001228246224060925,
+    "levels": 200
+  },
+  "btc_context": {
+    "price": 81417,
+    "change_1h_pct": 0.5961097296269591,
+    "change_4h_pct": 0.6621060135633572,
+    "change_24h_pct": 0,
+    "corr_1m_0": 0.9999999981229809,
+    "corr_1m_1": 0.04554501840604168,
+    "corr_1m_2": 0.04995193240200211,
+    "corr_1m_3": -0.02930132600646588,
+    "corr_1m_5": -0.04476765745068546,
+    "corr_1m_10": -0.04526492470181918,
+    "best_lag_minutes": 0,
+    "best_lag_correlation": 0.9999999981229809,
+    "relative_1h_pct": -0.9595729837367228,
+    "relative_4h_pct": -0.06905142412392262,
+    "interpretation": "Максимальная корреляция доходностей BTC→монета среди проверенных лагов: 0 мин, corr=1.000. Это статистический контекст, а не гарантия догоняющего движения."
+  },
+  "strategies": {
+    "long": {
+      "score": 55,
+      "status": "watch",
+      "reason": "directional trend + momentum + volume + derivatives"
+    },
+    "long-grid": {
+      "score": 40,
+      "status": "risky",
+      "reason": "trend + volatility + support + grid range"
+    },
+    "neutral-grid": {
+      "score": 10,
+      "status": "avoid",
+      "reason": "range + trend neutrality + volatility + price position + liquidity"
+    },
+    "short": {
+      "score": 0,
+      "status": "avoid",
+      "reason": "directional downtrend + momentum + volume + derivatives"
+    },
+    "short-grid": {
+      "score": 45,
+      "status": "risky",
+      "reason": "impulse + volatility + structure + resistance + derivatives"
+    }
+  },
+  "ai_instructions": {
+    "task": "Проанализируй, есть ли сейчас статистически и технически обоснованный сценарий LONG или SHORT по указанной монете.",
+    "rules": [
+      "Не принимать score как готовый торговый сигнал — проверять исходные метрики.",
+      "Учитывать одновременно 15m/1h/4h, momentum, RSI, ATR, объём, funding, OI, long/short ratio, стакан и уровни.",
+      "Отдельно проверить BTC-контекст и lead-lag: совпадает ли текущее движение монеты с BTC и есть ли исторический лаг.",
+      "Не придумывать данные, которых нет в JSON.",
+      "Если преимущества LONG/SHORT недостаточно — прямо написать WAIT."
+    ],
+    "requested_output": [
+      "Итог: LONG / SHORT / WAIT.",
+      "Уровень уверенности 0-100.",
+      "Точка или зона входа.",
+      "SL и 1-3 цели TP с объяснением.",
+      "Главный сценарий и сценарий отмены.",
+      "Какие метрики сильнее всего подтверждают решение и какие ему противоречат."
+    ]
+  }
+}
