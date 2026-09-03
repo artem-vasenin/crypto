@@ -224,7 +224,7 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 	defer e.mu.Unlock()
 
 	now := time.Now().UTC()
-	staleThreshold := 90 * time.Minute
+	staleThreshold := 60 * time.Minute
 
 	for symbol, pos := range e.positions {
 		if pos.Side == "PENDING" || pos.Side != e.targetSide {
@@ -232,8 +232,7 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 		}
 
 		if pos.OpenedAt.IsZero() {
-			pos.OpenedAt = now
-			continue
+			pos.OpenedAt = now.Add(-30 * time.Minute)
 		}
 
 		if now.Sub(pos.OpenedAt) > staleThreshold {
@@ -249,8 +248,8 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			if pnlPct < 0.5 && pnlPct > -0.8 {
-				log.Printf("[TIME-STOP] Closing stale position %s %s (Age: %s, PnL: %.2f%%)",
+			if pnlPct < 0.4 && pnlPct > -0.8 {
+				log.Printf("[TIME-STOP] Liquidating stale flat position %s %s (Hold Time: %s, PnL: %.2f%%)",
 					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
 
 				go func(sym, side string, qty float64) {
@@ -290,7 +289,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	// СТРОГАЯ АТОМАРНАЯ СЕКЦИЯ: ПРОВЕРКА И ЗАХВАТ СЛОТА
 	e.mu.Lock()
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
@@ -364,8 +362,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	} else {
 		spreadPct := (askPrice - bidPrice) / askPrice * 100.0
-		if spreadPct > 0.15 {
-			return fmt.Errorf("rejected %s: spread %.3f%% exceeds max 0.15%% threshold", c.Symbol, spreadPct)
+		if spreadPct > 0.10 {
+			return fmt.Errorf("rejected %s: spread %.3f%% exceeds max 0.10%% limit", c.Symbol, spreadPct)
 		}
 		if side == "Buy" {
 			currentPrice = askPrice
@@ -591,7 +589,6 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 
 	e.mu.Lock()
 
-	// GARBAGE COLLECTION: Авто-сброс зависших PENDING старше 30 секунд
 	for sym, pos := range e.positions {
 		if pos.Side == "PENDING" && now.Sub(pos.OpenedAt) > 30*time.Second {
 			log.Printf("[CLEANUP] Expired PENDING state for %s. Refunding margin.", sym)
@@ -635,7 +632,6 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 		}
 	}
 
-	// Очистка призрачных позиций (за исключением валидных PENDING)
 	for sym, pos := range e.positions {
 		if pos.Side != "PENDING" && pos.Side == e.targetSide && !exchangeActive[sym] {
 			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state. Activating 30m Post-Trade Cooldown.", sym)
