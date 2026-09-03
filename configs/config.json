@@ -4,10 +4,10 @@
   },
   "filters": {
     "max_price": 50.0,
-    "min_turnover_24h": 2000000.0,
+    "min_turnover_24h": 3000000.0,
     "preselect_candidates": 60,
     "top_candidates": 20,
-    "max_grid_spread_pct": 0.15
+    "max_grid_spread_pct": 0.10
   },
   "analysis": {
     "kline_limit_15m": 300,
@@ -19,17 +19,17 @@
   },
   "execution": {
     "testnet": false,
-    "max_leverage": 2,
-    "margin_per_trade_usd": 5.0,
-    "max_total_margin_usd": 20.0,
+    "max_leverage": 3,
+    "margin_per_trade_usd": 4.0,
+    "max_total_margin_usd": 16.0,
     "max_active_positions": 3,
-    "min_score": 75.0,
-    "trailing_pct": 1.5,
+    "min_score": 80.0,
+    "trailing_pct": 1.2,
     "check_interval": "1m"
   },
   "concurrency": 8,
-  "http_timeout": "15s",
-  "run_timeout": "3m",
+  "http_timeout": "10s",
+  "run_timeout": "2m",
   "max_retries": 3,
   "retry_delay": "500ms",
   "output": {

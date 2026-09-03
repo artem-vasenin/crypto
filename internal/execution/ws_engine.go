@@ -348,9 +348,11 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 		if err := json.Unmarshal(base.Data, &execData); err == nil {
 			for _, exec := range execData {
 				closedSz, _ := strconv.ParseFloat(exec.ClosedSize, 64)
-				if closedSz > 0 && w.onExecution != nil {
+				execQty, _ := strconv.ParseFloat(exec.ExecQty, 64)
+
+				// Пропускаем дальше если закрыли часть позиции ИЛИ открыли новый лот
+				if (closedSz > 0 || execQty > 0) && w.onExecution != nil {
 					price, _ := strconv.ParseFloat(exec.ExecPrice, 64)
-					qty, _ := strconv.ParseFloat(exec.ExecQty, 64)
 					fee, _ := strconv.ParseFloat(exec.ExecFee, 64)
 					tsMS, _ := strconv.ParseInt(exec.ExecTime, 10, 64)
 
@@ -358,7 +360,7 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 						Symbol:     exec.Symbol,
 						Side:       exec.Side,
 						ExecPrice:  price,
-						ExecQty:    qty,
+						ExecQty:    execQty,
 						ExecFee:    fee,
 						OrderType:  exec.OrderType,
 						ExecType:   exec.ExecType,

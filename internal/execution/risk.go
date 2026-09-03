@@ -9,8 +9,6 @@ import (
 	"universal-bybit-screener/models"
 )
 
-// CalculateDynamicLeverage вычисляет адаптивное плечо (от 1x до maxLeverage из config.json)
-// на основе оценки стратегии (Score), волатильности (ATR%) и ликвидности (Turnover).
 func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeverage int) int {
 	if maxLeverage <= 1 {
 		return 1
@@ -21,13 +19,11 @@ func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeve
 		return 1
 	}
 
-	// 1. Множитель по Score стратегии
 	scoreFactor := 1.0
 	if res.Score < 75.0 {
 		scoreFactor = 0.66
 	}
 
-	// 2. Множитель по волатильности (ATR 1h в %)
 	volatilityFactor := 1.0
 	if c.Indicators.ATR1hPct > 3.5 {
 		volatilityFactor = 0.33
@@ -35,7 +31,6 @@ func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeve
 		volatilityFactor = 0.66
 	}
 
-	// 3. Множитель по суточному обороту (Turnover)
 	liquidityFactor := 1.0
 	if c.Market.Turnover24h < 2000000.0 {
 		liquidityFactor = 0.5
@@ -54,7 +49,6 @@ func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeve
 	return finalLeverage
 }
 
-// CalculatePositionQty рассчитывает точный объем позиции с гарантийным покрытием MinNotional Bybit
 func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQty, minNotional float64) float64 {
 	if price <= 0 || leverage <= 0 || marginUSD <= 0 || qtyStep <= 0 {
 		return 0
@@ -62,20 +56,19 @@ func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQt
 
 	notionalUSD := marginUSD * float64(leverage)
 	targetMinNotional := math.Max(minNotional, 10.5)
+
 	if notionalUSD < targetMinNotional {
-		notionalUSD = targetMinNotional
+		return 0
 	}
 
 	rawQty := notionalUSD / price
 	if rawQty < minQty {
-		rawQty = minQty
+		return 0
 	}
-
-	steps := math.Floor(rawQty / qtyStep)
-	qty := steps * qtyStep
 
 	precision := GetPrecision(qtyStep)
 	factor := math.Pow(10, float64(precision))
+	qty := math.Floor((rawQty / qtyStep)) * qtyStep
 	qty = math.Floor(qty*factor+0.5) / factor
 
 	if qty < minQty {
@@ -85,7 +78,6 @@ func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQt
 	return qty
 }
 
-// RoundToStep атомарно округляет значение кратно step без накладных расходов на ParseFloat
 func RoundToStep(val, step float64) float64 {
 	if step <= 0 || val <= 0 {
 		return val
@@ -109,8 +101,6 @@ func FormatStep(val, step float64) string {
 	return strconv.FormatFloat(RoundToStep(val, step), 'f', precision, 64)
 }
 
-// ValidateStopLoss проверяет физическую корректность и границы SL.
-// maxRiskPct (например 2.5%) — это МАКСИМАЛЬНО допустимый риск.
 func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct float64) bool {
 	if slPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -131,10 +121,10 @@ func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct float64) bool
 		return false
 	}
 
-	return distPct >= 0.8 && distPct <= maxRiskPct
+	// Порог подняли с 0.8% до 1.2% для защиты от рыночного шума и комиссий Taker
+	return distPct >= 1.2 && distPct <= maxRiskPct
 }
 
-// ValidateTakeProfit проверяет физическую корректность и границы TP
 func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) bool {
 	if tpPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -155,5 +145,6 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) 
 		return false
 	}
 
-	return distPct >= minProfitPct && distPct <= 20.0
+	effectiveMinProfit := math.Max(minProfitPct, 1.8)
+	return distPct >= effectiveMinProfit && distPct <= 20.0
 }
