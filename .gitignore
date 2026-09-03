@@ -11,3 +11,5 @@ short-screening.json
 bot
 screener
 logs
+bot.tmp
+screener.tmp
