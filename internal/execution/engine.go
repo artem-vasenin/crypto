@@ -35,7 +35,7 @@ type Engine struct {
 	lastBalanceCheck time.Time
 	wsEngine         *WSEngine
 	targetSide       string
-	processedExecs   map[string]time.Time // Дедупликация с TTL очисткой
+	processedExecs   map[string]time.Time
 }
 
 func NewEngine(cfg models.BotConfig, strategy string) *Engine {
@@ -96,7 +96,6 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 
 	entryPrice := pos.EntryPrice
 	var grossPnL float64
-	// В V5 WS exec.Side показывает сторону закрывающего ордера
 	if pos.Side == "Buy" {
 		grossPnL = (exec.ExecPrice - entryPrice) * exec.ClosedSize
 	} else if pos.Side == "Sell" {
@@ -189,7 +188,6 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	defer e.mu.Unlock()
 
 	now := time.Now()
-	// TTL очистка кеша дедупликации (убираем записи старше 15 минут)
 	for id, t := range e.processedExecs {
 		if now.Sub(t) > 15*time.Minute {
 			delete(e.processedExecs, id)
@@ -221,7 +219,6 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	}
 }
 
-// CheckStalePositions ликвидирует зависшие в боковике позиции
 func (e *Engine) CheckStalePositions(ctx context.Context) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -234,7 +231,6 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 			continue
 		}
 
-		// Если дата открытия еще не установлена
 		if pos.OpenedAt.IsZero() {
 			pos.OpenedAt = now
 			continue
@@ -253,7 +249,6 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			// Закрываем позиции, не давшие импульса (-0.8% < PnL < +0.5%)
 			if pnlPct < 0.5 && pnlPct > -0.8 {
 				log.Printf("[TIME-STOP] Closing stale position %s %s (Age: %s, PnL: %.2f%%)",
 					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
@@ -295,6 +290,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
+	// СТРОГАЯ АТОМАРНАЯ СЕКЦИЯ: ПРОВЕРКА И ЗАХВАТ СЛОТА
 	e.mu.Lock()
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
@@ -591,8 +587,19 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 	exchangeActive := make(map[string]bool)
 	targetSideCount := 0
 	totalSideUnrealizedPnL := 0.0
+	now := time.Now().UTC()
 
 	e.mu.Lock()
+
+	// GARBAGE COLLECTION: Авто-сброс зависших PENDING старше 30 секунд
+	for sym, pos := range e.positions {
+		if pos.Side == "PENDING" && now.Sub(pos.OpenedAt) > 30*time.Second {
+			log.Printf("[CLEANUP] Expired PENDING state for %s. Refunding margin.", sym)
+			delete(e.positions, sym)
+			e.cachedBalance += e.cfg.MarginPerTradeUSD
+		}
+	}
+
 	for _, pos := range res.Result.List {
 		size, _ := strconv.ParseFloat(pos.Size, 64)
 		if size > 0 {
@@ -628,6 +635,7 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 		}
 	}
 
+	// Очистка призрачных позиций (за исключением валидных PENDING)
 	for sym, pos := range e.positions {
 		if pos.Side != "PENDING" && pos.Side == e.targetSide && !exchangeActive[sym] {
 			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state. Activating 30m Post-Trade Cooldown.", sym)
@@ -844,6 +852,18 @@ func (e *Engine) setLeverage(ctx context.Context, symbol string, leverage int) e
 }
 
 func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty, qtyStep, sl, tp, tickSize float64) (string, error) {
+	bid, ask, last, err := e.getLiveTicker(ctx, symbol)
+	if err == nil && last > 0 {
+		execPrice := ask
+		if side == "Sell" {
+			execPrice = bid
+		}
+		priceDevPct := math.Abs(execPrice-last) / last * 100.0
+		if priceDevPct > 0.10 {
+			return "", fmt.Errorf("rejected market order for %s: execution price deviation %.3f%% exceeds max 0.10%% limit", symbol, priceDevPct)
+		}
+	}
+
 	params := map[string]interface{}{
 		"category":    "linear",
 		"symbol":      symbol,
