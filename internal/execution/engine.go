@@ -221,6 +221,68 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	}
 }
 
+// CheckStalePositions ликвидирует зависшие в боковике позиции
+func (e *Engine) CheckStalePositions(ctx context.Context) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	now := time.Now().UTC()
+	staleThreshold := 90 * time.Minute
+
+	for symbol, pos := range e.positions {
+		if pos.Side == "PENDING" || pos.Side != e.targetSide {
+			continue
+		}
+
+		// Если дата открытия еще не установлена
+		if pos.OpenedAt.IsZero() {
+			pos.OpenedAt = now
+			continue
+		}
+
+		if now.Sub(pos.OpenedAt) > staleThreshold {
+			currentPrice := pos.EntryPrice
+			if wsPrice, ok := e.wsEngine.GetLatestPrice(symbol); ok && wsPrice > 0 {
+				currentPrice = wsPrice
+			}
+
+			pnlPct := 0.0
+			if pos.Side == "Buy" {
+				pnlPct = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100.0
+			} else if pos.Side == "Sell" {
+				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
+			}
+
+			// Закрываем позиции, не давшие импульса (-0.8% < PnL < +0.5%)
+			if pnlPct < 0.5 && pnlPct > -0.8 {
+				log.Printf("[TIME-STOP] Closing stale position %s %s (Age: %s, PnL: %.2f%%)",
+					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
+
+				go func(sym, side string, qty float64) {
+					closeSide := "Sell"
+					if side == "Sell" {
+						closeSide = "Buy"
+					}
+
+					params := map[string]interface{}{
+						"category":    "linear",
+						"symbol":      sym,
+						"side":        closeSide,
+						"orderType":   "Market",
+						"qty":         strconv.FormatFloat(qty, 'f', -1, 64),
+						"reduceOnly":  true,
+						"timeInForce": "GTC",
+					}
+					_, err := e.doSignedPOST(ctx, "/v5/order/create", params, sym)
+					if err != nil {
+						log.Printf("[ERROR] Time-Stop execution failed for %s: %v", sym, err)
+					}
+				}(symbol, pos.Side, pos.Size)
+			}
+		}
+	}
+}
+
 func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
 	_ = e.wsEngine.SubscribeTicker(c.Symbol)
 
@@ -499,6 +561,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 func (e *Engine) LogActivePositions(ctx context.Context) {
 	e.syncClosedPositionsREST(ctx)
+	e.CheckStalePositions(ctx)
 
 	path := "/v5/position/list"
 	queryString := "category=linear&settleCoin=USDT"
