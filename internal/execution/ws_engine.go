@@ -103,10 +103,15 @@ func (w *WSEngine) connectAndReadPublic(ctx context.Context, url string) {
 
 		w.resubscribeTickers()
 
+		// Запуск Ping Heartbeat для публичного сокета
+		pingCtx, pingCancel := context.WithCancel(ctx)
+		go w.startHeartbeat(pingCtx, conn, &w.pubConnMu, "Public")
+
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
 				log.Printf("[WS WARN] Public Read error: %v. Reconnecting...", err)
+				pingCancel()
 				_ = conn.Close()
 				break
 			}
@@ -127,6 +132,7 @@ func (w *WSEngine) connectAndReadPublic(ctx context.Context, url string) {
 				}
 			}
 		}
+		pingCancel()
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -230,17 +236,45 @@ func (w *WSEngine) connectAndReadPrivate(ctx context.Context, url string) {
 		}
 		_ = conn.WriteJSON(subReq)
 
+		// Запуск Ping Heartbeat для приватного сокета каждые 20 секунд
+		pingCtx, pingCancel := context.WithCancel(ctx)
+		go w.startHeartbeat(pingCtx, conn, &w.privConnMu, "Private")
+
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
 				log.Printf("[WS WARN] Private Read error: %v. Reconnecting...", err)
+				pingCancel()
 				_ = conn.Close()
 				break
 			}
 
 			w.parsePrivateMessage(message)
 		}
+		pingCancel()
 		time.Sleep(2 * time.Second)
+	}
+}
+
+// startHeartbeat отправляет ping каждые 20 секунд согласно требованиям Bybit V5 API
+func (w *WSEngine) startHeartbeat(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, connType string) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			mu.Lock()
+			if conn != nil {
+				pingReq := map[string]string{"op": "ping"}
+				if err := conn.WriteJSON(pingReq); err != nil {
+					log.Printf("[WS WARN] %s Ping failed: %v", connType, err)
+				}
+			}
+			mu.Unlock()
+		}
 	}
 }
 
