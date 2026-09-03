@@ -27,6 +27,7 @@ type Engine struct {
 	baseURL          string
 	mu               sync.Mutex
 	positions        map[string]*models.PositionState
+	closedHistory    map[string]*models.PositionState
 	cooldowns        map[string]time.Time
 	disabledTokens   map[string]bool
 	leverageSetCache map[string]bool
@@ -52,6 +53,7 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		client:           &http.Client{Timeout: 10 * time.Second},
 		baseURL:          baseURL,
 		positions:        make(map[string]*models.PositionState),
+		closedHistory:    make(map[string]*models.PositionState),
 		cooldowns:        make(map[string]time.Time),
 		disabledTokens:   make(map[string]bool),
 		leverageSetCache: make(map[string]bool),
@@ -81,21 +83,30 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	pos, exists := e.positions[exec.Symbol]
-	estimatedPnL := 0.0
+	entryPrice := 0.0
+	posSide := e.targetSide
 
-	if exists && pos.EntryPrice > 0 {
-		if pos.Side == "Buy" {
-			estimatedPnL = (exec.ExecPrice - pos.EntryPrice) * exec.ClosedSize
-		} else if pos.Side == "Sell" {
-			estimatedPnL = (pos.EntryPrice - exec.ExecPrice) * exec.ClosedSize
+	if pos, exists := e.positions[exec.Symbol]; exists && pos.EntryPrice > 0 {
+		entryPrice = pos.EntryPrice
+		posSide = pos.Side
+	} else if posHist, existsHist := e.closedHistory[exec.Symbol]; existsHist && posHist.EntryPrice > 0 {
+		entryPrice = posHist.EntryPrice
+		posSide = posHist.Side
+	}
+
+	estimatedPnL := 0.0
+	if entryPrice > 0 {
+		if posSide == "Buy" {
+			estimatedPnL = (exec.ExecPrice - entryPrice) * exec.ClosedSize
+		} else if posSide == "Sell" {
+			estimatedPnL = (entryPrice - exec.ExecPrice) * exec.ClosedSize
 		}
 	}
 
 	netPnL := estimatedPnL - exec.ExecFee
 
-	log.Printf("[TRADE CLOSED] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Est. Net PnL: %.4f USDT | ExecType: %s | OrderType: %s",
-		exec.Symbol, exec.Side, exec.ClosedSize, pos.EntryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType, exec.OrderType)
+	log.Printf("[TRADE CLOSED] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Net PnL: %.4f USDT | ExecType: %s | OrderType: %s",
+		exec.Symbol, exec.Side, exec.ClosedSize, entryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType, exec.OrderType)
 }
 
 func (e *Engine) InitWebSocket(ctx context.Context) error {
@@ -112,8 +123,9 @@ func (e *Engine) handlePositionClosedWS(symbol string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if _, active := e.positions[symbol]; active {
+	if pos, active := e.positions[symbol]; active {
 		log.Printf("[CLEANUP WS] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
+		e.closedHistory[symbol] = pos
 		delete(e.positions, symbol)
 		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
 	}
@@ -345,6 +357,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	if !e.hasActivePosition(ctx, symbol) {
 		log.Printf("[CLEANUP] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
 		e.mu.Lock()
+		e.closedHistory[symbol] = pos
 		delete(e.positions, symbol)
 		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
 		e.mu.Unlock()
@@ -461,6 +474,7 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 	for sym, pos := range e.positions {
 		if pos.Side != "PENDING" && pos.Side == e.targetSide && !exchangeActive[sym] {
 			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state. Activating 30m Post-Trade Cooldown.", sym)
+			e.closedHistory[sym] = pos
 			delete(e.positions, sym)
 			e.cooldowns[sym] = time.Now().Add(30 * time.Minute)
 		}

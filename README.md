@@ -170,3 +170,8 @@ cd /opt/trading-bot && git pull && go build -ldflags="-s -w" -o screener ./cmd/s
 journalctl -u bot-long -u bot-short --since "today" -o cat | grep -E "\[SUCCESS\]|\[TRAILING\]|\[CLEANUP\]"
 journalctl -u bot-short -u bot-long --since "3 minutes ago" -o cat | grep -E "\[ERROR\]|\[WARN\]|\[SUCCESS\]|\[BALANCE\]"
 ```
+
+Уведомления у выходах из позиции
+```bash
+journalctl -u bot-long -u bot-short -f -o cat | grep -E "\[TRADE CLOSED\]"
+```
