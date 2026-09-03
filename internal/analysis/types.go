@@ -99,6 +99,9 @@ type Levels struct {
 	RangeWidthPct     float64   `json:"range_width_pct"`
 	RangePositionPct  float64   `json:"range_position_pct"`
 	RangeToATR1h      float64   `json:"range_to_atr_1h"`
+	PriceDiscovery    bool      `json:"price_discovery"`
+	RecentRangeHigh   float64   `json:"recent_range_high"`
+	RecentRangeLow    float64   `json:"recent_range_low"`
 }
 type Derivatives struct {
 	FundingRate           float64 `json:"funding_rate"`
@@ -133,6 +136,7 @@ type BTCContext struct {
 	Relative1hPct      float64 `json:"relative_1h_pct"`
 	Relative4hPct      float64 `json:"relative_4h_pct"`
 	Interpretation     string  `json:"interpretation"`
+	SelfReference      bool    `json:"self_reference"`
 }
 type Strategy struct {
 	Score  int    `json:"score"`

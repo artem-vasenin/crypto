@@ -20,8 +20,6 @@ type MarketAPI interface {
 	OrderBook(context.Context, string, int) (bybit.OrderBook, error)
 }
 
-type series struct{ candles []bybit.Candle }
-
 func closes(c []bybit.Candle) []float64 {
 	x := make([]float64, len(c))
 	for i, v := range c {
@@ -42,6 +40,15 @@ func pct(a, b float64) float64 {
 		return 0
 	}
 	return (a/b - 1) * 100
+}
+
+// ratioPct возвращает отношение a к b в процентах.
+// В отличие от pct это не процентное изменение, поэтому 644 / 81416 = 0.79%.
+func ratioPct(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b * 100
 }
 
 func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report, error) {
@@ -105,7 +112,7 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 	atr4 := indicators.ATR(toIndicator(c4h), 14)
 
 	m := Market{Price: ticker.LastPrice, Change24hPct: ticker.Price24hPct, Change3dPct: change(c1h, 72), Change7dPct: change(c4h, 42), Turnover24h: ticker.Turnover24h, Volume24h: ticker.Volume24h, SpreadPct: pct(ticker.AskPrice, ticker.BidPrice)}
-	ind := Indicators{RSI15m: indicators.RSI(p15, 14), RSI1h: indicators.RSI(p1, 14), RSI4h: indicators.RSI(p4, 14), ATR15m: atr15, ATR1h: atr1, ATR4h: atr4, ATR1hPct: pct(atr1, ticker.LastPrice), ATR4hPct: pct(atr4, ticker.LastPrice), VolumeRatio1h: indicators.VolumeRatio(vols(c1h), 6, 24)}
+	ind := Indicators{RSI15m: indicators.RSI(p15, 14), RSI1h: indicators.RSI(p1, 14), RSI4h: indicators.RSI(p4, 14), ATR15m: atr15, ATR1h: atr1, ATR4h: atr4, ATR1hPct: ratioPct(atr1, ticker.LastPrice), ATR4hPct: ratioPct(atr4, ticker.LastPrice), VolumeRatio1h: indicators.VolumeRatio(vols(c1h), 6, 24)}
 	trend := Trend{EMA20_15m: last(e15), EMA50_15m: last(e15_50), EMA200_15m: last(e15_200), EMA20_1h: last(e1), EMA50_1h: last(e1_50), EMA200_1h: last(e1_200), EMA20_4h: last(e4), EMA50_4h: last(e4_50), EMA200_4h: last(e4_200), PriceVsEMA20_1hPct: pct(ticker.LastPrice, last(e1)), PriceVsEMA50_1hPct: pct(ticker.LastPrice, last(e1_50)), PriceVsEMA200_1hPct: pct(ticker.LastPrice, last(e1_200))}
 	mom := Momentum{Change1hPct: change(c1h, 1), Change4hPct: change(c1h, 4), Change12hPct: change(c1h, 12), Change24hPct: change(c1h, 24), ROC1hPct: change(c1h, 1), ROC4hPct: change(c1h, 4)}
 	vol := Volume{Volume5m: sumRecent(c1m, 5), Volume15m: sumRecent(c1m, 15), Volume1h: sumRecent(c1m, 60), Ratio5m: volumeRatioRecent(c1m, 5, 60), Ratio15m: volumeRatioRecent(c1m, 15, 60), Ratio1h: volumeRatioRecent(c1m, 60, 240)}
@@ -114,22 +121,32 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 	der := Derivatives{FundingRate: ticker.FundingRate, OpenInterest: ticker.OpenInterest}
 	if len(funding) > 0 {
 		der.FundingAvg = avgFunding(funding)
-		der.FundingAvg24h = avgFunding(funding)
+		der.FundingAvg24h = avgFundingSince(funding, time.Now().UTC().Add(-24*time.Hour))
 	}
 	if len(oi) > 1 {
-		der.OpenInterestChangePct = pct(oi[len(oi)-1].Value, oi[0].Value)
+		// Bybit может вернуть OI от новых записей к старым.
+		// Сначала приводим ряд к old -> new, затем считаем изменение.
+		sort.Slice(oi, func(i, j int) bool { return oi[i].Time.Before(oi[j].Time) })
+		oldest, newest := oi[0].Value, oi[len(oi)-1].Value
+		if oldest != 0 {
+			der.OpenInterestChangePct = (newest/oldest - 1) * 100
+		}
 	}
 	if len(ls) > 0 {
 		der.LongRatio = ls[0].BuyRatio
 		der.ShortRatio = ls[0].SellRatio
 	}
 	order := OrderBook{BidNotional: ob.BidNotional, AskNotional: ob.AskNotional, ImbalancePct: ob.ImbalancePct, BidAskRatio: ob.Ratio, SpreadPct: m.SpreadPct, Levels: ob.Levels}
-	btc := buildBTCContext(c1m, btc1m, btcTicker, c1h, btc1m)
+	btc := buildBTCContext(c1m, btc1m, btcTicker, c1h, symbol == "BTCUSDT")
 	strategies := scoreStrategies(m, ind, trend, mom, structure, levels, der, order, btc)
 
 	notes := []string{}
-	if len(c1m) < days*24*60 {
-		notes = append(notes, "Bybit вернул меньше запрошенного объёма 1m истории; lead-lag рассчитан по доступным свечам.")
+	requested1m := min(1000, days*24*60)
+	if len(c1m) < requested1m {
+		notes = append(notes, fmt.Sprintf("Доступно %d из %d запрошенных 1m свечей; lead-lag рассчитан по доступной истории.", len(c1m), requested1m))
+	}
+	if days > 1 {
+		notes = append(notes, "В текущей версии один запрос Bybit ограничен 1000 свечами; параметр days ограничивает запрос максимум 7 днями, но не выполняет постраничную загрузку сверх лимита API.")
 	}
 	if symbol == "BTCUSDT" {
 		notes = append(notes, "Для BTCUSDT BTC lead-lag сравнивает инструмент с самим BTC и поэтому не является независимым сигналом.")
@@ -176,6 +193,19 @@ func volumeRatioRecent(c []bybit.Candle, n, long int) float64 {
 	return indicators.Mean(volumes(c[len(c)-n:])) / indicators.Mean(volumes(c[len(c)-long:]))
 }
 func volumes(c []bybit.Candle) []float64 { return vols(c) }
+func avgFundingSince(f []bybit.Funding, since time.Time) float64 {
+	filtered := make([]bybit.Funding, 0, len(f))
+	for _, x := range f {
+		if !x.Time.Before(since) {
+			filtered = append(filtered, x)
+		}
+	}
+	if len(filtered) == 0 {
+		return avgFunding(f)
+	}
+	return avgFunding(filtered)
+}
+
 func avgFunding(f []bybit.Funding) float64 {
 	if len(f) == 0 {
 		return 0
@@ -264,6 +294,7 @@ func buildLevels(c []bybit.Candle, atr, price float64) Levels {
 	if len(res) > 0 {
 		nr = res[0]
 	}
+	priceDiscovery := len(res) == 0 && price >= hi
 	if len(sup) > 0 {
 		ns = sup[0]
 	}
@@ -277,7 +308,7 @@ func buildLevels(c []bybit.Candle, atr, price float64) Levels {
 			return 0
 		}
 		return (hi - lo) / atr
-	}()}
+	}(), PriceDiscovery: priceDiscovery, RecentRangeHigh: hi, RecentRangeLow: lo}
 }
 func tail(v []float64, n int) []float64 {
 	if len(v) <= n {
@@ -286,9 +317,18 @@ func tail(v []float64, n int) []float64 {
 	return v[len(v)-n:]
 }
 
-func buildBTCContext(c, btc []bybit.Candle, t bybit.Ticker, target1h []bybit.Candle, _ []bybit.Candle) BTCContext {
+func buildBTCContext(c, btc []bybit.Candle, t bybit.Ticker, target1h []bybit.Candle, selfReference bool) BTCContext {
+	ctx := BTCContext{Price: t.LastPrice, Change24hPct: t.Price24hPct, SelfReference: selfReference}
+	btcHourly := btcTo1h(btc)
+	ctx.Change1hPct = change(btcHourly, 1)
+	ctx.Change4hPct = change(btcHourly, 4)
+
+	if selfReference {
+		ctx.Interpretation = "BTCUSDT выбран как анализируемый инструмент: BTC-контекст является самоссылочным и не используется как независимый lead-lag сигнал."
+		return ctx
+	}
+
 	cr := alignReturns(c, btc)
-	ctx := BTCContext{Price: t.LastPrice, Change1hPct: change(btcTo1h(btc), 1), Change4hPct: change(btcTo1h(btc), 4), Change24hPct: change(btcTo1h(btc), 24)}
 	lags := []int{0, 1, 2, 3, 5, 10}
 	vals := make([]float64, len(lags))
 	for i, l := range lags {
@@ -311,12 +351,13 @@ func buildBTCContext(c, btc []bybit.Candle, t bybit.Ticker, target1h []bybit.Can
 	ctx.BestLagMinutes = best
 	ctx.BestLagCorrelation = bestv
 	if len(target1h) > 4 {
-		ctx.Relative1hPct = change(target1h, 1) - change(btcTo1h(btc), 1)
-		ctx.Relative4hPct = change(target1h, 4) - change(btcTo1h(btc), 4)
+		ctx.Relative1hPct = change(target1h, 1) - change(btcHourly, 1)
+		ctx.Relative4hPct = change(target1h, 4) - change(btcHourly, 4)
 	}
 	ctx.Interpretation = fmt.Sprintf("Максимальная корреляция доходностей BTC→монета среди проверенных лагов: %d мин, corr=%.3f. Это статистический контекст, а не гарантия догоняющего движения.", best, bestv)
 	return ctx
 }
+
 func btcTo1h(c []bybit.Candle) []bybit.Candle {
 	if len(c) < 60 {
 		return c
@@ -341,26 +382,43 @@ func btcTo1h(c []bybit.Candle) []bybit.Candle {
 	return out
 }
 func alignReturns(a, b []bybit.Candle) []float64 {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	if n < 4 {
+	if len(a) < 2 || len(b) < 2 {
 		return nil
 	}
-	ra, rb := indicators.Returns(closes(a[n-len(a):])), indicators.Returns(closes(b[n-len(b):]))
-	if len(ra) > len(rb) {
-		ra = ra[len(ra)-len(rb):]
+
+	// Сопоставляем доходности по timestamp, а не по позиции в массиве.
+	// Это защищает lead-lag от рассинхронизации рядов из-за пропущенных свечей.
+	bReturns := make(map[time.Time]float64, len(b)-1)
+	for i := 1; i < len(b); i++ {
+		if b[i-1].Close != 0 {
+			bReturns[b[i].Time] = b[i].Close/b[i-1].Close - 1
+		}
 	}
-	if len(rb) > len(ra) {
-		rb = rb[len(rb)-len(ra):]
+
+	aReturns := make([]float64, 0, len(a)-1)
+	bAligned := make([]float64, 0, len(a)-1)
+	for i := 1; i < len(a); i++ {
+		if a[i-1].Close == 0 {
+			continue
+		}
+		br, ok := bReturns[a[i].Time]
+		if !ok {
+			continue
+		}
+		aReturns = append(aReturns, a[i].Close/a[i-1].Close-1)
+		bAligned = append(bAligned, br)
 	}
-	out := make([]float64, 0, len(ra)*2)
-	for i := range ra {
-		out = append(out, ra[i], rb[i])
+
+	if len(aReturns) < 4 {
+		return nil
+	}
+	out := make([]float64, 0, len(aReturns)*2)
+	for i := range aReturns {
+		out = append(out, aReturns[i], bAligned[i])
 	}
 	return out
 }
+
 func lagCorr(pairs []float64, lag int) float64 {
 	if len(pairs) < 6 {
 		return 0
