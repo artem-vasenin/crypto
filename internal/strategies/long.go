@@ -11,19 +11,27 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	st1 := c.Structure["1h"]
 	st4 := c.Structure["4h"]
 
-	// 1. HARD GATES
+	// 1. HARD GATES (Абсолютные блокировки)
 	if st1.HighState == "LH" && st1.LowState == "LL" {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h confirmed downtrend"}
 	}
 
-	// Отбраковка опасных аномалий волатильности
 	if c.Indicators.ATR1hPct > 4.0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive 1h volatility (ATR > 4%)"}
 	}
 
-	// Отбраковка при отрицательном дисбалансе стакана (продавцы давят)
-	if c.OrderBook.ImbalancePct < -30.0 {
+	if c.OrderBook.ImbalancePct < -25.0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook order imbalance heavily ask-dominated"}
+	}
+
+	// HARD GATE: Запрет входа в Long в верхней четверти канала (> 75% высоты диапазона)
+	if c.Levels.RangePositionPct > 75.0 && c.Levels.NearestResistance > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry too close to resistance zone (>75% range)"}
+	}
+
+	// HARD GATE: Перекупленность RSI 1h
+	if c.Indicators.RSI1h >= 70.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h overbought (>= 70)"}
 	}
 
 	priceUp := c.Market.Change24h > 0
@@ -36,14 +44,14 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 
 	score := 0.0
 
-	// 2. OI / PRICE MATRIX
+	// 2. OI / PRICE MATRIX SCORING
 	if priceUp && oiUp {
-		score += 20 // New Money
+		score += 25 // New Money (приток капитала)
 	} else if !priceUp && oiDown {
 		score -= 15 // Long Liquidation
 	}
 
-	// 3. STRUCTURE
+	// 3. STRUCTURE SCORING
 	if st1.HighState == "HH" {
 		score += 20
 	}
@@ -57,23 +65,22 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		score += 10
 	}
 
-	if st1.HighState == "LH" || st1.LowState == "LL" {
-		score -= 15
-	}
-
-	// 4. INDICATORS & L2 LIQUIDITY
-	if c.Indicators.RSI1h > 52 && c.Indicators.RSI1h < 68 {
-		score += 10
-	} else if c.Indicators.RSI1h >= 70 {
-		score -= 10
-	}
-
-	if c.Indicators.VolumeRatio1h > 1.2 {
+	// 4. INDICATORS & POSITION WITHIN RANGE
+	if c.Indicators.RSI1h > 50 && c.Indicators.RSI1h < 65 {
 		score += 10
 	}
 
-	if c.OrderBook.ImbalancePct > 20.0 {
-		score += 10 // Покупатели доминируют в L2 стакане
+	if c.Indicators.VolumeRatio1h > 1.1 {
+		score += 10
+	}
+
+	// Бонус за вход в нижней части канала (15% - 45%)
+	if c.Levels.RangePositionPct >= 15.0 && c.Levels.RangePositionPct <= 45.0 {
+		score += 15
+	}
+
+	if c.OrderBook.ImbalancePct > 15.0 {
+		score += 10
 	}
 
 	if c.Derivatives.FundingRate < 0 {
@@ -85,6 +92,6 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	return models.StrategyResult{
 		Score:  score,
 		Status: status(score),
-		Reason: "directional long + L2 imbalance + new money",
+		Reason: "directional long + safe range position + new money",
 	}
 }

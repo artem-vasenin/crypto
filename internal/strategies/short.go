@@ -20,9 +20,18 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive 1h volatility (ATR > 4%)"}
 	}
 
-	// Отбраковка при сильном бычьем стакане
-	if c.OrderBook.ImbalancePct > 30.0 {
+	if c.OrderBook.ImbalancePct > 25.0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook order imbalance heavily bid-dominated"}
+	}
+
+	// HARD GATE: Запрет входа в Short в нижней четверти канала (< 25% высоты диапазона)
+	if c.Levels.RangePositionPct < 25.0 && c.Levels.NearestSupport > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry too close to support zone (<25% range)"}
+	}
+
+	// HARD GATE: Перепроданность RSI 1h
+	if c.Indicators.RSI1h <= 30.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h oversold (<= 30)"}
 	}
 
 	priceDown := c.Market.Change24h < 0
@@ -35,14 +44,14 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 
 	score := 0.0
 
-	// 2. OI / PRICE MATRIX
+	// 2. OI / PRICE MATRIX SCORING
 	if priceDown && oiUp {
-		score += 20 // Aggressive Shorts
+		score += 25 // Aggressive Shorts
 	} else if !priceDown && oiDown {
 		score -= 15
 	}
 
-	// 3. STRUCTURE
+	// 3. STRUCTURE SCORING
 	if st1.HighState == "LH" {
 		score += 20
 	}
@@ -56,23 +65,22 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 		score += 10
 	}
 
-	if st1.HighState == "HH" || st1.LowState == "HL" {
-		score -= 15
-	}
-
-	// 4. INDICATORS & L2 LIQUIDITY
-	if c.Indicators.RSI1h < 48 && c.Indicators.RSI1h > 32 {
-		score += 10
-	} else if c.Indicators.RSI1h <= 30 {
-		score -= 10
-	}
-
-	if c.Indicators.VolumeRatio1h > 1.2 {
+	// 4. INDICATORS & POSITION WITHIN RANGE
+	if c.Indicators.RSI1h < 50 && c.Indicators.RSI1h > 35 {
 		score += 10
 	}
 
-	if c.OrderBook.ImbalancePct < -20.0 {
-		score += 10 // Продавцы плотно стоят в L2 стакане
+	if c.Indicators.VolumeRatio1h > 1.1 {
+		score += 10
+	}
+
+	// Бонус за вход в верхней части канала (55% - 85%)
+	if c.Levels.RangePositionPct >= 55.0 && c.Levels.RangePositionPct <= 85.0 {
+		score += 15
+	}
+
+	if c.OrderBook.ImbalancePct < -15.0 {
+		score += 10
 	}
 
 	if c.Derivatives.FundingRate > 0 {
@@ -84,6 +92,6 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 	return models.StrategyResult{
 		Score:  score,
 		Status: status(score),
-		Reason: "directional short + L2 ask pressure + aggressive shorts",
+		Reason: "directional short + safe range position + aggressive shorts",
 	}
 }
