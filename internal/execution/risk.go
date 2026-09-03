@@ -5,7 +5,54 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"universal-bybit-screener/models"
 )
+
+// CalculateDynamicLeverage вычисляет адаптивное плечо (от 1x до maxLeverage из config.json)
+// на основе оценки стратегии (Score), волатильности (ATR%) и ликвидности (Turnover).
+func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeverage int) int {
+	if maxLeverage <= 1 {
+		return 1
+	}
+
+	res, ok := c.Strategies[targetStrategy]
+	if !ok || res.Score < 55.0 {
+		return 1
+	}
+
+	// 1. Множитель по Score стратегии
+	scoreFactor := 1.0
+	if res.Score < 75.0 {
+		scoreFactor = 0.66
+	}
+
+	// 2. Множитель по волатильности (ATR 1h в %)
+	volatilityFactor := 1.0
+	if c.Indicators.ATR1hPct > 3.5 {
+		volatilityFactor = 0.33
+	} else if c.Indicators.ATR1hPct > 2.0 {
+		volatilityFactor = 0.66
+	}
+
+	// 3. Множитель по суточному обороту (Turnover)
+	liquidityFactor := 1.0
+	if c.Market.Turnover24h < 2000000.0 {
+		liquidityFactor = 0.5
+	}
+
+	calculatedLeverage := float64(maxLeverage) * scoreFactor * volatilityFactor * liquidityFactor
+	finalLeverage := int(math.Floor(calculatedLeverage))
+
+	if finalLeverage < 1 {
+		return 1
+	}
+	if finalLeverage > maxLeverage {
+		return maxLeverage
+	}
+
+	return finalLeverage
+}
 
 // CalculatePositionQty рассчитывает точный объем позиции с гарантийным покрытием MinNotional Bybit
 func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQty, minNotional float64) float64 {
@@ -63,7 +110,7 @@ func FormatStep(val, step float64) string {
 }
 
 // ValidateStopLoss проверяет физическую корректность и границы SL.
-// maxRiskPct (например 2.5%) — это МАКСИМАЛЬНО допустимый риск, а не минимальный!
+// maxRiskPct (например 2.5%) — это МАКСИМАЛЬНО допустимый риск.
 func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct float64) bool {
 	if slPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -84,8 +131,6 @@ func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct float64) bool
 		return false
 	}
 
-	// Минимальный отступ 0.8% закладывается от рыночного шума и спреда.
-	// Риск позиции НЕ ДОЛЖЕН ПРЕВЫШАТЬ maxRiskPct.
 	return distPct >= 0.8 && distPct <= maxRiskPct
 }
 

@@ -30,7 +30,7 @@ type Engine struct {
 	closedHistory    map[string]*models.PositionState
 	cooldowns        map[string]time.Time
 	disabledTokens   map[string]bool
-	leverageSetCache map[string]bool
+	leverageSetCache map[string]int
 	cachedBalance    float64
 	lastBalanceCheck time.Time
 	wsEngine         *WSEngine
@@ -56,7 +56,7 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		closedHistory:    make(map[string]*models.PositionState),
 		cooldowns:        make(map[string]time.Time),
 		disabledTokens:   make(map[string]bool),
-		leverageSetCache: make(map[string]bool),
+		leverageSetCache: make(map[string]int),
 		targetSide:       targetSide,
 	}
 
@@ -273,22 +273,26 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
-	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, e.cfg.MaxLeverage, currentPrice, qtyStep, minQty, minNotional)
+	// Динамический расчет плеча в рамках e.cfg.MaxLeverage
+	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
+
+	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, currentPrice, qtyStep, minQty, minNotional)
 	if qty <= 0 {
 		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
 	}
 
 	e.mu.Lock()
-	isLeverageSet := e.leverageSetCache[c.Symbol]
+	cachedLev := e.leverageSetCache[c.Symbol]
 	e.mu.Unlock()
 
-	if !isLeverageSet {
-		_ = e.setTradeModeIsolated(ctx, c.Symbol)
-		if err := e.setLeverage(ctx, c.Symbol, e.cfg.MaxLeverage); err != nil {
-			log.Printf("[WARN] Set leverage for %s: %v", c.Symbol, err)
+	// Переключаем плечо только если закешированное значение отличается от targetLeverage
+	if cachedLev != targetLeverage {
+		_ = e.setTradeModeIsolated(ctx, c.Symbol, targetLeverage)
+		if err := e.setLeverage(ctx, c.Symbol, targetLeverage); err != nil {
+			log.Printf("[WARN] Set leverage x%d for %s: %v", targetLeverage, c.Symbol, err)
 		} else {
 			e.mu.Lock()
-			e.leverageSetCache[c.Symbol] = true
+			e.leverageSetCache[c.Symbol] = targetLeverage
 			e.mu.Unlock()
 		}
 	}
@@ -322,8 +326,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 
 	orderPlaced = true
 
-	log.Printf("[SUCCESS] Position opened: %s %s | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
-		c.Symbol, side, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
+	log.Printf("[SUCCESS] Position opened: %s %s | Leverage: x%d | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
+		c.Symbol, side, targetLeverage, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
 
 	e.mu.Lock()
 	e.positions[c.Symbol] = &models.PositionState{
@@ -661,13 +665,14 @@ func (e *Engine) getInstrumentLimits(ctx context.Context, symbol string) (qtySte
 	return qtyStep, minQty, tickSize, minNotional, nil
 }
 
-func (e *Engine) setTradeModeIsolated(ctx context.Context, symbol string) error {
+func (e *Engine) setTradeModeIsolated(ctx context.Context, symbol string, leverage int) error {
+	levStr := strconv.Itoa(leverage)
 	params := map[string]interface{}{
 		"category":     "linear",
 		"symbol":       symbol,
 		"tradeMode":    1,
-		"buyLeverage":  strconv.Itoa(e.cfg.MaxLeverage),
-		"sellLeverage": strconv.Itoa(e.cfg.MaxLeverage),
+		"buyLeverage":  levStr,
+		"sellLeverage": levStr,
 	}
 	_, err := e.doSignedPOST(ctx, "/v5/position/switch-isolated", params, symbol)
 	return err
