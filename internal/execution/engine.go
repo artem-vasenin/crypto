@@ -35,6 +35,7 @@ type Engine struct {
 	lastBalanceCheck time.Time
 	wsEngine         *WSEngine
 	targetSide       string
+	processedExecs   map[string]bool // Дедупликация обработанных ордеров/исполнений
 }
 
 func NewEngine(cfg models.BotConfig, strategy string) *Engine {
@@ -58,6 +59,7 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		disabledTokens:   make(map[string]bool),
 		leverageSetCache: make(map[string]int),
 		targetSide:       targetSide,
+		processedExecs:   make(map[string]bool),
 	}
 
 	e.wsEngine = NewWSEngine(
@@ -85,28 +87,35 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 
 	pos, exists := e.positions[exec.Symbol]
 	if !exists {
-		return // Игнорируем исполнения, если позиции нет в локальном стейте
-	}
-
-	entryPrice := pos.EntryPrice
-	if entryPrice <= 0 {
 		return
 	}
 
-	netPnL := 0.0
-	if pos.Side == "Buy" {
-		netPnL = (exec.ExecPrice-entryPrice)*exec.ClosedSize - exec.ExecFee
-	} else if pos.Side == "Sell" {
-		netPnL = (entryPrice-exec.ExecPrice)*exec.ClosedSize - exec.ExecFee
+	if exec.ClosedSize <= 0 {
+		return
 	}
+
+	// Коррекция на Partial Fill: уменьшаем текущий размер позиции в памяти
+	pos.Size -= exec.ClosedSize
+
+	entryPrice := pos.EntryPrice
+	var grossPnL float64
+	if pos.Side == "Buy" {
+		grossPnL = (exec.ExecPrice - entryPrice) * exec.ClosedSize
+	} else if pos.Side == "Sell" {
+		grossPnL = (entryPrice - exec.ExecPrice) * exec.ClosedSize
+	}
+
+	netPnL := grossPnL - exec.ExecFee
 
 	log.Printf("[TRADE CLOSED WS] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Net PnL: %.4f USDT | ExecType: %s",
 		exec.Symbol, pos.Side, exec.ClosedSize, entryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType)
 
-	// Удаляем позицию из памяти ТОЛЬКО когда она полностью закрыта
-	e.closedHistory[exec.Symbol] = pos
-	delete(e.positions, exec.Symbol)
-	e.cooldowns[exec.Symbol] = time.Now().Add(30 * time.Minute)
+	// Удаляем из активных позиций только если позиция полностью закрыта (с учетом округления)
+	if pos.Size <= 0.000001 {
+		e.closedHistory[exec.Symbol] = pos
+		delete(e.positions, exec.Symbol)
+		e.cooldowns[exec.Symbol] = time.Now().Add(30 * time.Minute)
+	}
 }
 
 func (e *Engine) InitWebSocket(ctx context.Context) error {
@@ -146,10 +155,11 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 	return nil
 }
 
+// syncClosedPositionsREST теперь выполняет строго дедуплицированную синхронизацию с временным окном
 func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
+	// Запрашиваем закрытия строго за последние 10 минут во избежание зацикливания
+	startTime := time.Now().Add(-10 * time.Minute).UnixMilli()
 	path := "/v5/position/closed-pnl"
-	// Берем только свежие закрытия за последние 15 минут
-	startTime := time.Now().Add(-15 * time.Minute).UnixMilli()
 	queryString := fmt.Sprintf("category=linear&limit=10&startTime=%d", startTime)
 
 	body, err := e.doSignedGET(ctx, path, queryString)
@@ -161,6 +171,7 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 		RetCode int `json:"retCode"`
 		Result  struct {
 			List []struct {
+				OrderId       string `json:"orderId"`
 				Symbol        string `json:"symbol"`
 				OrderSide     string `json:"orderSide"`
 				ClosedPnl     string `json:"closedPnl"`
@@ -168,7 +179,7 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 				AvgExitPrice  string `json:"avgExitPrice"`
 				ClosedSize    string `json:"closedSize"`
 				ExecType      string `json:"execType"`
-				CreatedTime   string `json:"createdTime"`
+				UpdatedTime   string `json:"updatedTime"`
 			} `json:"list"`
 		} `json:"result"`
 	}
@@ -181,13 +192,16 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	defer e.mu.Unlock()
 
 	for _, item := range res.Result.List {
-		// Восстанавливаем ТОЛЬКО если позиция есть в e.positions
+		if e.processedExecs[item.OrderId] {
+			continue
+		}
+
 		pos, exists := e.positions[item.Symbol]
 		if !exists {
 			continue
 		}
 
-		pnl, _ := strconv.ParseFloat(item.ClosedPnl, 64) // Bybit уже отдал чистый PnL
+		pnl, _ := strconv.ParseFloat(item.ClosedPnl, 64)
 		entry, _ := strconv.ParseFloat(item.AvgEntryPrice, 64)
 		exit, _ := strconv.ParseFloat(item.AvgExitPrice, 64)
 		size, _ := strconv.ParseFloat(item.ClosedSize, 64)
@@ -195,9 +209,15 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 		log.Printf("[TRADE CLOSED REST RESTORE] %s | Qty: %.4f | Entry: %.4f | Exit: %.4f | Net PnL: %.4f USDT | ExecType: %s",
 			item.Symbol, size, entry, exit, pnl, item.ExecType)
 
+		e.processedExecs[item.OrderId] = true
 		e.closedHistory[item.Symbol] = pos
-		delete(e.positions, item.Symbol) // Атомарно удаляем, чтобы не было повтора в следующую минуту
+		delete(e.positions, item.Symbol)
 		e.cooldowns[item.Symbol] = time.Now().Add(30 * time.Minute)
+	}
+
+	// Очистка кеша дедупликации при разрастании
+	if len(e.processedExecs) > 1000 {
+		e.processedExecs = make(map[string]bool)
 	}
 }
 
@@ -244,10 +264,11 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	requiredMarginWithBuffer := e.cfg.MarginPerTradeUSD * 1.05
+	// Расчет Risk Management с учетом Taker Fee буфера (0.11% roundtrip)
+	requiredMarginWithBuffer := e.cfg.MarginPerTradeUSD * 1.02
 	if e.cachedBalance < requiredMarginWithBuffer {
 		e.mu.Unlock()
-		return fmt.Errorf("insufficient balance: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
+		return fmt.Errorf("insufficient balance with fee buffer: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
 	}
 
 	e.cachedBalance -= e.cfg.MarginPerTradeUSD
@@ -330,7 +351,23 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 
 	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
 
-	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, currentPrice, qtyStep, minQty, minNotional)
+	// Динамический расчёт объёма позиции исходя из RPT (Risk Per Trade = 1.5% от депозита)
+	riskPerCoin := math.Abs(currentPrice - slPrice)
+	if riskPerCoin <= 0 {
+		return fmt.Errorf("invalid risk distance for %s", c.Symbol)
+	}
+
+	e.mu.Lock()
+	maxRiskUSD := math.Min(e.cachedBalance*0.015, 1.5) // Лимит риска на 1 сделку в $
+	e.mu.Unlock()
+
+	rawRiskQty := maxRiskUSD / riskPerCoin
+	maxNotionalAllowed := e.cfg.MarginPerTradeUSD * float64(targetLeverage)
+	maxQtyAllowed := maxNotionalAllowed / currentPrice
+
+	finalQty := math.Min(rawRiskQty, maxQtyAllowed)
+	qty := CalculatePositionQty(finalQty*currentPrice/float64(targetLeverage), targetLeverage, currentPrice, qtyStep, minQty, minNotional)
+
 	if qty <= 0 {
 		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
 	}
@@ -351,8 +388,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	}
 
 	actualRiskDist := math.Abs(currentPrice - slPrice)
-	minTPDist := currentPrice * 0.030
-	tpDist := math.Max(actualRiskDist*2.0, minTPDist)
+	minTPDist := currentPrice * 0.025
+	tpDist := math.Max(actualRiskDist*1.8, minTPDist)
 	tpPrice := 0.0
 
 	if side == "Buy" {
@@ -368,7 +405,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	}
 	tpPrice = RoundToStep(tpPrice, tickSize)
 
-	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.5) {
+	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.2) {
 		return fmt.Errorf("take profit validation failed for %s (entry: %.4f, tp: %.4f)", c.Symbol, currentPrice, tpPrice)
 	}
 
