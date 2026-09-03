@@ -173,11 +173,10 @@ journalctl -u bot-short -u bot-long --since "3 minutes ago" -o cat | grep -E "\[
 
 Уведомления у выходах из позиции
 ```bash
-journalctl -u bot-long -u bot-short -f -o cat | grep -E "\[TRADE CLOSED\]"
+journalctl -u bot-long -u bot-short -n 200 -o cat | grep -E "\[TRADE CLOSED|REST RESTORE\]"
 ```
 
 ## Deploy
 ```bash
-cd /opt/trading-bot
 deploy
 ```
