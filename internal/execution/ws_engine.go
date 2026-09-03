@@ -103,7 +103,6 @@ func (w *WSEngine) connectAndReadPublic(ctx context.Context, url string) {
 
 		w.resubscribeTickers()
 
-		// Запуск Ping Heartbeat для публичного сокета
 		pingCtx, pingCancel := context.WithCancel(ctx)
 		go w.startHeartbeat(pingCtx, conn, &w.pubConnMu, "Public")
 
@@ -221,10 +220,12 @@ func (w *WSEngine) connectAndReadPrivate(ctx context.Context, url string) {
 		}
 
 		if err := conn.WriteJSON(authReq); err != nil {
+			log.Printf("[WS ERROR] Private auth payload send failed: %v", err)
 			_ = conn.Close()
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		log.Printf("[WS INFO] Private auth request dispatched successfully.")
 
 		w.privConnMu.Lock()
 		w.privateConn = conn
@@ -234,9 +235,12 @@ func (w *WSEngine) connectAndReadPrivate(ctx context.Context, url string) {
 			"op":   "subscribe",
 			"args": []string{"position", "wallet", "execution"},
 		}
-		_ = conn.WriteJSON(subReq)
+		if err := conn.WriteJSON(subReq); err != nil {
+			log.Printf("[WS ERROR] Private subscribe payload send failed: %v", err)
+		} else {
+			log.Printf("[WS INFO] Subscribed to private topics: [position, wallet, execution].")
+		}
 
-		// Запуск Ping Heartbeat для приватного сокета каждые 20 секунд
 		pingCtx, pingCancel := context.WithCancel(ctx)
 		go w.startHeartbeat(pingCtx, conn, &w.privConnMu, "Private")
 
@@ -256,7 +260,6 @@ func (w *WSEngine) connectAndReadPrivate(ctx context.Context, url string) {
 	}
 }
 
-// startHeartbeat отправляет ping каждые 20 секунд согласно требованиям Bybit V5 API
 func (w *WSEngine) startHeartbeat(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, connType string) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
