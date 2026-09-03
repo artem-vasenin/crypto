@@ -73,7 +73,6 @@ func main() {
 		log.Printf("[WARN] WebSocket initialization warning: %v", err)
 	}
 
-	// Первичная разовая вычитка баланса и позиций при холодно-стартовом вызове
 	if err := engine.RefreshBalance(ctx); err != nil {
 		log.Printf("[ERROR] Initial balance refresh failed: %v", err)
 	}
@@ -103,7 +102,6 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 		return
 	}
 
-	// Вызов RefreshBalance здесь УБРАН: обновление идет исключительно по WebSocket Push от Bybit
 	engine.LogActivePositions(ctx)
 
 	data, err := os.ReadFile(filePath)

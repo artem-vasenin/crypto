@@ -18,13 +18,29 @@ import (
 )
 
 type Service struct {
-	client   *bybit.Client
-	cfg      config.Config
-	strategy strategies.Strategy
+	client     *bybit.Client
+	cfg        config.Config
+	strategy   strategies.Strategy
+	klineCache *bybit.KlineCache
+	obCache    *bybit.OrderBookCache
+	wsStream   *bybit.PublicWSStream
+	isWarmedUp bool
+	mu         sync.Mutex
 }
 
 func NewService(c *bybit.Client, cfg config.Config, s strategies.Strategy) *Service {
-	return &Service{client: c, cfg: cfg, strategy: s}
+	ob := bybit.NewOrderBookCache()
+	kc := bybit.NewKlineCache()
+	ws := bybit.NewPublicWSStream(ob, kc)
+
+	return &Service{
+		client:     c,
+		cfg:        cfg,
+		strategy:   s,
+		klineCache: kc,
+		obCache:    ob,
+		wsStream:   ws,
+	}
 }
 
 func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
@@ -62,27 +78,36 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 		filtered = filtered[:s.cfg.Filters.PreselectCandidates]
 	}
 
-	obCache := bybit.NewOrderBookCache()
-	wsClient := bybit.NewWSClient(obCache)
-
 	symbols := make([]string, len(filtered))
 	for i, p := range filtered {
 		symbols[i] = p.i.Symbol
 	}
 
-	log.Printf("[INFO] Initializing L2 OrderBook WS Stream for %d preselected tickers...", len(symbols))
-	if err := wsClient.SubscribeOrderBooks(ctx, symbols); err != nil {
-		return models.ScreeningResult{}, fmt.Errorf("WS OrderBook subscription failed: %w", err)
-	}
+	s.mu.Lock()
+	if !s.isWarmedUp {
+		log.Printf("[WS WARMUP] Cold start: Fetching REST Klines warmup for %d tickers...", len(symbols))
+		s.warmupKlinesREST(ctx, symbols)
 
-	select {
-	case <-time.After(5 * time.Second):
-	case <-ctx.Done():
-		return models.ScreeningResult{}, ctx.Err()
+		log.Printf("[WS START] Starting async Public WS Stream (OrderBooks + Klines)...")
+		if err := s.wsStream.Start(ctx, symbols); err != nil {
+			s.mu.Unlock()
+			return models.ScreeningResult{}, fmt.Errorf("WS stream start failed: %w", err)
+		}
+
+		s.isWarmedUp = true
+		s.mu.Unlock()
+
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			return models.ScreeningResult{}, ctx.Err()
+		}
+	} else {
+		s.mu.Unlock()
 	}
 
 	results := make([]models.Candidate, 0, len(filtered))
-	var mu sync.Mutex
+	var resMu sync.Mutex
 	sem := make(chan struct{}, s.cfg.Concurrency)
 	var wg sync.WaitGroup
 
@@ -98,15 +123,15 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 			}
 			defer func() { <-sem }()
 
-			cand, e := s.analyze(ctx, obCache, p.i, p.t)
+			cand, e := s.analyzeWS(ctx, p.i, p.t)
 			if e != nil {
 				log.Printf("[WARN] Symbol %s analysis skipped: %v", p.i.Symbol, e)
 				return
 			}
 
-			mu.Lock()
+			resMu.Lock()
 			results = append(results, cand)
-			mu.Unlock()
+			resMu.Unlock()
 		}()
 	}
 	wg.Wait()
@@ -132,34 +157,48 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	}, nil
 }
 
-func spreadPct(t models.Ticker) float64 {
-	if t.LastPrice <= 0 || t.Bid1Price <= 0 || t.Ask1Price <= 0 {
-		return 0
+func (s *Service) warmupKlinesREST(ctx context.Context, symbols []string) {
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+
+	for _, sym := range symbols {
+		sym := sym
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			if c15, err := s.client.Klines(ctx, sym, "15", s.cfg.Analysis.KlineLimit15m); err == nil {
+				s.klineCache.Warmup(sym, "15", c15)
+			}
+			if c60, err := s.client.Klines(ctx, sym, "60", s.cfg.Analysis.KlineLimit1h); err == nil {
+				s.klineCache.Warmup(sym, "60", c60)
+			}
+			if c240, err := s.client.Klines(ctx, sym, "240", s.cfg.Analysis.KlineLimit4h); err == nil {
+				s.klineCache.Warmup(sym, "240", c240)
+			}
+		}()
 	}
-	return (t.Ask1Price - t.Bid1Price) / t.LastPrice * 100
+	wg.Wait()
 }
 
-func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, inst models.Instrument, t models.Ticker) (models.Candidate, error) {
-	type res struct {
-		c   []models.Candle
-		err error
+func (s *Service) analyzeWS(ctx context.Context, inst models.Instrument, t models.Ticker) (models.Candidate, error) {
+	c15 := s.klineCache.Get(inst.Symbol, "15")
+	c60 := s.klineCache.Get(inst.Symbol, "60")
+	c240 := s.klineCache.Get(inst.Symbol, "240")
+
+	if len(c15) < 20 || len(c60) < 20 || len(c240) < 20 {
+		return models.Candidate{}, fmt.Errorf("insufficient WS kline history for %s", inst.Symbol)
 	}
-	ch15, ch1, ch4 := make(chan res, 1), make(chan res, 1), make(chan res, 1)
+
 	oiCh := make(chan []models.OpenInterestPoint, 1)
 	fundCh := make(chan []models.FundingPoint, 1)
 
-	go func() {
-		c, e := s.client.Klines(ctx, inst.Symbol, "15", s.cfg.Analysis.KlineLimit15m)
-		ch15 <- res{c: c, err: e}
-	}()
-	go func() {
-		c, e := s.client.Klines(ctx, inst.Symbol, "60", s.cfg.Analysis.KlineLimit1h)
-		ch1 <- res{c: c, err: e}
-	}()
-	go func() {
-		c, e := s.client.Klines(ctx, inst.Symbol, "240", s.cfg.Analysis.KlineLimit4h)
-		ch4 <- res{c: c, err: e}
-	}()
 	go func() {
 		o, _ := s.client.OpenInterest(ctx, inst.Symbol, "1h", s.cfg.Analysis.OpenInterestLimit)
 		oiCh <- o
@@ -169,24 +208,18 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 		fundCh <- f
 	}()
 
-	a, b, d := <-ch15, <-ch1, <-ch4
 	oi, fund := <-oiCh, <-fundCh
-
-	if a.err != nil || b.err != nil || d.err != nil {
-		return models.Candidate{}, fmt.Errorf("kline fetch error: 15m_err=%v, 1h_err=%v, 4h_err=%v", a.err, b.err, d.err)
-	}
-
-	book := obCache.GetMetrics(inst.Symbol)
+	book := s.obCache.GetMetrics(inst.Symbol)
 
 	ind := models.Indicators{
-		RSI15m:        indicators.RSI(a.c, 14),
-		RSI1h:         indicators.RSI(b.c, 14),
-		RSI4h:         indicators.RSI(d.c, 14),
-		ATR15m:        indicators.ATR(a.c, 14),
-		ATR1h:         indicators.ATR(b.c, 14),
-		ATR4h:         indicators.ATR(d.c, 14),
-		VolumeRatio1h: indicators.VolumeRatio(b.c, 20),
-		VolumeTrend1h: indicators.VolumeTrend(b.c, 5, 20),
+		RSI15m:        indicators.RSI(c15, 14),
+		RSI1h:         indicators.RSI(c60, 14),
+		RSI4h:         indicators.RSI(c240, 14),
+		ATR15m:        indicators.ATR(c15, 14),
+		ATR1h:         indicators.ATR(c60, 14),
+		ATR4h:         indicators.ATR(c240, 14),
+		VolumeRatio1h: indicators.VolumeRatio(c60, 20),
+		VolumeTrend1h: indicators.VolumeTrend(c60, 5, 20),
 	}
 	if t.LastPrice > 0 {
 		ind.ATR1hPct = ind.ATR1h / t.LastPrice * 100
@@ -194,9 +227,9 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 	}
 
 	structures := map[string]models.Structure{
-		"15m": structure.Analyze(a.c, 2, 5),
-		"1h":  structure.Analyze(b.c, 2, 5),
-		"4h":  structure.Analyze(d.c, 2, 5),
+		"15m": structure.Analyze(c15, 2, 5),
+		"1h":  structure.Analyze(c60, 2, 5),
+		"4h":  structure.Analyze(c240, 2, 5),
 	}
 
 	levels := structure.ApplyATR(structure.Levels(structures["1h"], t.LastPrice), ind.ATR1h, t.LastPrice)
@@ -218,8 +251,8 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 	c.Symbol = inst.Symbol
 	c.Market.Price = t.LastPrice
 	c.Market.Change24h = t.Price24hPcnt
-	c.Market.Change3d = changeN(b.c, 72)
-	c.Market.Change7d = changeN(b.c, 168)
+	c.Market.Change3d = changeN(c60, 72)
+	c.Market.Change7d = changeN(c60, 168)
 	c.Market.Turnover24h = t.Turnover24h
 	c.Market.Volume24h = t.Volume24h
 	c.Market.SpreadPct = der.SpreadPct
@@ -239,6 +272,13 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 	}
 
 	return c, nil
+}
+
+func spreadPct(t models.Ticker) float64 {
+	if t.LastPrice <= 0 || t.Bid1Price <= 0 || t.Ask1Price <= 0 {
+		return 0
+	}
+	return (t.Ask1Price - t.Bid1Price) / t.LastPrice * 100
 }
 
 func fundingAverage24h(points []models.FundingPoint) float64 {
