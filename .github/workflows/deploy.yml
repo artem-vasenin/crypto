@@ -1,0 +1,28 @@
+name: Deploy to VDS
+
+on:
+  push:
+    branches:
+      - sail-both-v1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VDS
+        env:
+          VDS_HOST: ${{ secrets.VDS_HOST }}
+          VDS_SSH_KEY: ${{ secrets.VDS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          echo "$VDS_SSH_KEY" > ~/.ssh/vds_deploy_key
+          chmod 600 ~/.ssh/vds_deploy_key
+
+          ssh \
+            -i ~/.ssh/vds_deploy_key \
+            -o StrictHostKeyChecking=no \
+            root@$VDS_HOST \
+            "PATH=/usr/local/go/bin:\$PATH make -C /opt/trading-bot deploy"
