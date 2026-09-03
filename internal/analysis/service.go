@@ -27,7 +27,6 @@ func NewService(c *bybit.Client, cfg config.Config, s strategies.Strategy) *Serv
 	return &Service{client: c, cfg: cfg, strategy: s}
 }
 
-// Run запускает полный итеративный цикл скрининга с предварительным прогревом WS-кэша стакана
 func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	inst, err := s.client.Instruments(ctx)
 	if err != nil {
@@ -49,7 +48,7 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 		if !ok || t.LastPrice <= 0 || t.LastPrice > s.cfg.Filters.MaxPrice || t.Turnover24h < s.cfg.Filters.MinTurnover24h {
 			continue
 		}
-		if isGridStrategy(s.strategy.Name()) && spreadPct(t) > s.cfg.Filters.MaxGridSpreadPct {
+		if spreadPct(t) > s.cfg.Filters.MaxGridSpreadPct {
 			continue
 		}
 		filtered = append(filtered, pair{i, t})
@@ -63,7 +62,6 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 		filtered = filtered[:s.cfg.Filters.PreselectCandidates]
 	}
 
-	// Асинхронная инициализация WebSocket L2 OrderBook Cache
 	obCache := bybit.NewOrderBookCache()
 	wsClient := bybit.NewWSClient(obCache)
 
@@ -77,9 +75,8 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 		return models.ScreeningResult{}, fmt.Errorf("WS OrderBook subscription failed: %w", err)
 	}
 
-	// Warmup: Ожидание 3 секунды для накопления первичных каскадных snapshots от WS
 	select {
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	case <-ctx.Done():
 		return models.ScreeningResult{}, ctx.Err()
 	}
@@ -135,10 +132,6 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	}, nil
 }
 
-func isGridStrategy(name string) bool {
-	return name == "short-grid" || name == "long-grid" || name == "neutral-grid"
-}
-
 func spreadPct(t models.Ticker) float64 {
 	if t.LastPrice <= 0 || t.Bid1Price <= 0 || t.Ask1Price <= 0 {
 		return 0
@@ -155,21 +148,26 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 	oiCh := make(chan []models.OpenInterestPoint, 1)
 	fundCh := make(chan []models.FundingPoint, 1)
 
-	// REST-запросы ограничены только историческими свечами, OI и истории фандинга
 	go func() {
 		c, e := s.client.Klines(ctx, inst.Symbol, "15", s.cfg.Analysis.KlineLimit15m)
-		ch15 <- res{c, e}
+		ch15 <- res{c: c, err: e}
 	}()
-	go func() { c, e := s.client.Klines(ctx, inst.Symbol, "60", s.cfg.Analysis.KlineLimit1h); ch1 <- res{c, e} }()
+	go func() {
+		c, e := s.client.Klines(ctx, inst.Symbol, "60", s.cfg.Analysis.KlineLimit1h)
+		ch1 <- res{c: c, err: e}
+	}()
 	go func() {
 		c, e := s.client.Klines(ctx, inst.Symbol, "240", s.cfg.Analysis.KlineLimit4h)
-		ch4 <- res{c, e}
+		ch4 <- res{c: c, err: e}
 	}()
 	go func() {
 		o, _ := s.client.OpenInterest(ctx, inst.Symbol, "1h", s.cfg.Analysis.OpenInterestLimit)
 		oiCh <- o
 	}()
-	go func() { f, _ := s.client.Funding(ctx, inst.Symbol, s.cfg.Analysis.FundingLimit); fundCh <- f }()
+	go func() {
+		f, _ := s.client.Funding(ctx, inst.Symbol, s.cfg.Analysis.FundingLimit)
+		fundCh <- f
+	}()
 
 	a, b, d := <-ch15, <-ch1, <-ch4
 	oi, fund := <-oiCh, <-fundCh
@@ -178,7 +176,6 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 		return models.Candidate{}, fmt.Errorf("kline fetch error: 15m_err=%v, 1h_err=%v, 4h_err=%v", a.err, b.err, d.err)
 	}
 
-	// Чтение неблокирующего метрического среза L2-стакана из WS-кэша O(1)
 	book := obCache.GetMetrics(inst.Symbol)
 
 	ind := models.Indicators{
@@ -212,8 +209,9 @@ func (s *Service) analyze(ctx context.Context, obCache *bybit.OrderBookCache, in
 	der.FundingAvg24h = fundingAverage24h(fund)
 	der.FundingAvg = der.FundingAvg24h
 
-	if len(oi) >= 2 && oi[0].OpenInterest > 0 {
-		der.OpenInterestChange = (oi[len(oi)-1].OpenInterest/oi[0].OpenInterest - 1) * 100
+	nOI := len(oi)
+	if nOI >= 4 && oi[nOI-4].OpenInterest > 0 {
+		der.OpenInterestChange = (oi[nOI-1].OpenInterest/oi[nOI-4].OpenInterest - 1) * 100
 	}
 
 	var c models.Candidate
@@ -283,17 +281,5 @@ func changeN(c []models.Candle, n int) float64 {
 }
 
 func BuildAIPrompt(strategy string) string {
-	return fmt.Sprintf(`Ты — криптоаналитик. Проанализируй JSON-скрининг Bybit для стратегии "%s".
-
-Задача:
-1. Оцени кандидатов не только по score, но и по исходным данным.
-2. Проверь структуру 15m/1h/4h, ближайшие support/resistance и положение цены в диапазоне.
-3. Учти RSI, ATR, объём, funding, Open Interest и стакан.
-4. Найди противоречия между метриками и случаи, где score может быть обманчив.
-5. Для лучших кандидатов опиши основной сценарий и сценарий слома.
-6. Для Grid отдельно оцени ширину диапазона, ATR, положение цены, ликвидность и риск выхода из диапазона.
-7. Не придумывай данные, которых нет в JSON.
-8. В финале дай shortlist лучших кандидатов и объясни, почему они лучше остальных.
-
-Score — эвристический рейтинг скриннера, а не вероятность прибыли и не гарантия сделки.`, strategy)
+	return fmt.Sprintf(`Анализ скрининга Bybit V5 для стратегии "%s".`, strategy)
 }

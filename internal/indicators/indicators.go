@@ -6,8 +6,6 @@ import (
 	"universal-bybit-screener/models"
 )
 
-// RSI рассчитывает модифицированный сглаженный Wilder RSI.
-// При недостаточной длине выборки возвращает 0.
 func RSI(candles []models.Candle, period int) float64 {
 	if len(candles) <= period || period <= 0 {
 		return 0
@@ -47,7 +45,6 @@ func RSI(candles []models.Candle, period int) float64 {
 	return 100 - (100 / (1 + rs))
 }
 
-// ATR рассчитывает абсолютный Average True Range.
 func ATR(candles []models.Candle, period int) float64 {
 	if len(candles) <= period || period <= 0 {
 		return 0
@@ -67,7 +64,6 @@ func ATR(candles []models.Candle, period int) float64 {
 	return atr
 }
 
-// trueRange вычисляет истинный диапазон свечи
 func trueRange(c models.Candle, prevClose float64) float64 {
 	highLow := c.High - c.Low
 	highPrevClose := math.Abs(c.High - prevClose)
@@ -76,7 +72,7 @@ func trueRange(c models.Candle, prevClose float64) float64 {
 	return math.Max(highLow, math.Max(highPrevClose, lowPrevClose))
 }
 
-// VolumeRatio сравнивает объем последней свечи со средним объемом предыдущего окна
+// VolumeRatio оценивает аномальный приток денег в USDT (Turnover)
 func VolumeRatio(candles []models.Candle, period int) float64 {
 	n := len(candles)
 	if n < period+1 || period <= 0 {
@@ -86,7 +82,7 @@ func VolumeRatio(candles []models.Candle, period int) float64 {
 	var sum float64
 	start := n - period - 1
 	for i := start; i < n-1; i++ {
-		sum += candles[i].Volume
+		sum += candles[i].Turnover
 	}
 
 	avg := sum / float64(period)
@@ -94,10 +90,9 @@ func VolumeRatio(candles []models.Candle, period int) float64 {
 		return 0
 	}
 
-	return candles[n-1].Volume / avg
+	return candles[n-1].Turnover / avg
 }
 
-// VolumeTrend вычисляет отношение короткого скользящего среднего объема к длинному
 func VolumeTrend(candles []models.Candle, shortPeriod, longPeriod int) float64 {
 	n := len(candles)
 	if shortPeriod <= 0 || longPeriod <= 0 || n < shortPeriod+longPeriod {
@@ -109,10 +104,10 @@ func VolumeTrend(candles []models.Candle, shortPeriod, longPeriod int) float64 {
 
 	var shortSum, longSum float64
 	for i := shortStart; i < n; i++ {
-		shortSum += candles[i].Volume
+		shortSum += candles[i].Turnover
 	}
 	for i := longStart; i < shortStart; i++ {
-		longSum += candles[i].Volume
+		longSum += candles[i].Turnover
 	}
 
 	shortAvg := shortSum / float64(shortPeriod)

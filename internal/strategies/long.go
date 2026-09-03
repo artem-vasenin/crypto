@@ -3,7 +3,6 @@ package strategies
 
 import "universal-bybit-screener/models"
 
-// Long оценивает направленную Long-позицию с использованием матрицы Price/OI
 type Long struct{}
 
 func (Long) Name() string { return "long" }
@@ -12,30 +11,39 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	st1 := c.Structure["1h"]
 	st4 := c.Structure["4h"]
 
-	// 1. HARD GATES: Забраковка при подтвержденном даунтренде 1h
+	// 1. HARD GATES
 	if st1.HighState == "LH" && st1.LowState == "LL" {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h confirmed downtrend"}
+	}
+
+	// Отбраковка опасных аномалий волатильности
+	if c.Indicators.ATR1hPct > 4.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive 1h volatility (ATR > 4%)"}
+	}
+
+	// Отбраковка при отрицательном дисбалансе стакана (продавцы давят)
+	if c.OrderBook.ImbalancePct < -30.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook order imbalance heavily ask-dominated"}
 	}
 
 	priceUp := c.Market.Change24h > 0
 	oiDown := c.Derivatives.OpenInterestChange < 0
 	oiUp := c.Derivatives.OpenInterestChange > 0
 
-	// Hard Gate: Short Covering (сквиз на закрытии шортов) — искусственный рост
 	if priceUp && oiDown && c.Market.Change24h > 2 && c.Derivatives.OpenInterestChange < -2 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "short covering detected (Price UP, OI DOWN)"}
 	}
 
 	score := 0.0
 
-	// 2. OI / PRICE MATRIX SCORING
+	// 2. OI / PRICE MATRIX
 	if priceUp && oiUp {
-		score += 15 // New Money (агрессивный приток капитала)
+		score += 20 // New Money
 	} else if !priceUp && oiDown {
-		score -= 10 // Long Liquidation (сброс лонгов)
+		score -= 15 // Long Liquidation
 	}
 
-	// 3. STRUCTURE SCORING
+	// 3. STRUCTURE
 	if st1.HighState == "HH" {
 		score += 20
 	}
@@ -43,33 +51,33 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		score += 20
 	}
 	if st4.HighState == "HH" {
-		score += 12
+		score += 10
 	}
 	if st4.LowState == "HL" {
-		score += 12
+		score += 10
 	}
 
 	if st1.HighState == "LH" || st1.LowState == "LL" {
 		score -= 15
 	}
 
-	// 4. INDICATORS & LIQUIDITY
-	if c.Indicators.RSI1h > 50 && c.Indicators.RSI1h < 70 {
+	// 4. INDICATORS & L2 LIQUIDITY
+	if c.Indicators.RSI1h > 52 && c.Indicators.RSI1h < 68 {
 		score += 10
 	} else if c.Indicators.RSI1h >= 70 {
-		score -= 5 // Зона перекупленности
+		score -= 10
 	}
 
-	if c.Indicators.RSI4h > 50 && c.Indicators.RSI4h < 70 {
-		score += 8
+	if c.Indicators.VolumeRatio1h > 1.2 {
+		score += 10
 	}
 
-	if c.Indicators.VolumeRatio1h > 1.0 {
-		score += 6
+	if c.OrderBook.ImbalancePct > 20.0 {
+		score += 10 // Покупатели доминируют в L2 стакане
 	}
 
 	if c.Derivatives.FundingRate < 0 {
-		score += 3 // Шорты платят лонгам
+		score += 5
 	}
 
 	score = clamp(score)
@@ -77,6 +85,6 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	return models.StrategyResult{
 		Score:  score,
 		Status: status(score),
-		Reason: "directional long + new money (OI/Price matrix)",
+		Reason: "directional long + L2 imbalance + new money",
 	}
 }
