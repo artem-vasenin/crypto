@@ -167,8 +167,11 @@ cd /opt/trading-bot && git pull && go build -ldflags="-s -w" -o screener ./cmd/s
 
 Посмотреть всякие логи
 ```bash
-journalctl -u bot-long -u bot-short --since "today" -o cat | grep -E "\[SUCCESS\]|\[TRAILING\]|\[CLEANUP\]"
-journalctl -u bot-short -u bot-long --since "3 minutes ago" -o cat | grep -E "\[ERROR\]|\[WARN\]|\[SUCCESS\]|\[BALANCE\]"
+# 1. Логи закрытых сделок и Time-Stop за последние 4 часа
+journalctl -u bot-long -u bot-short --since "4 hours ago" -o cat | grep -E "\[TRADE CLOSED|TIME-STOP|\[SUCCESS\]"
+
+# 2. Текущая сводка по слотам и балансу
+journalctl -u bot-long -u bot-short -n 4 -o cat | grep "SUMMARY"
 ```
 
 Уведомления у выходах из позиции
