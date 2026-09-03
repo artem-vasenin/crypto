@@ -87,7 +87,6 @@ func (e *Engine) handlePositionClosedWS(symbol string) {
 	if _, active := e.positions[symbol]; active {
 		log.Printf("[CLEANUP WS] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
 		delete(e.positions, symbol)
-		// Увеличен кулдаун до 30 минут для предотвращения частого перезахода (Over-trading)
 		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
 	}
 }
@@ -207,19 +206,26 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	// Валидация геометрии уровня SL с учетом направления позиции
-	slDist := currentPrice * 0.020
+	// Адаптивный расчет SL
+	slPct := 0.018
+	slDist := currentPrice * slPct
 	slPrice := 0.0
 
 	if side == "Buy" {
 		slPrice = currentPrice - slDist
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > slPrice {
-			slPrice = c.Levels.NearestSupport
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice {
+			supDistPct := (currentPrice - c.Levels.NearestSupport) / currentPrice
+			if supDistPct >= 0.012 && supDistPct <= 0.023 {
+				slPrice = c.Levels.NearestSupport
+			}
 		}
 	} else {
 		slPrice = currentPrice + slDist
-		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < (currentPrice+slDist*1.5) {
-			slPrice = c.Levels.NearestResistance
+		if c.Levels.NearestResistance > currentPrice {
+			resDistPct := (c.Levels.NearestResistance - currentPrice) / currentPrice
+			if resDistPct >= 0.012 && resDistPct <= 0.023 {
+				slPrice = c.Levels.NearestResistance
+			}
 		}
 	}
 	slPrice = RoundToStep(slPrice, tickSize)
@@ -432,6 +438,13 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 			e.cooldowns[sym] = time.Now().Add(30 * time.Minute)
 		}
 	}
+
+	if time.Since(e.lastBalanceCheck) > 3*time.Minute {
+		e.mu.Unlock()
+		_ = e.RefreshBalance(ctx)
+		e.mu.Lock()
+	}
+
 	balance := e.cachedBalance
 	e.mu.Unlock()
 
