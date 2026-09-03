@@ -4,20 +4,20 @@ BINARY_BOT=bot
 BINARY_SCREENER=screener
 SERVICES=screener-long screener-short bot-long bot-short
 
-# Компиляция бинарников с флагами оптимизации (минус отладочная информация)
+# Атомарная сборка во временные файлы
 build:
 	@echo "[BUILD] Compiling Go binaries..."
-	go build -ldflags="-s -w" -o $(BINARY_BOT) ./cmd/bot
-	go build -ldflags="-s -w" -o $(BINARY_SCREENER) ./cmd/screener
+	go build -ldflags="-s -w" -o $(BINARY_BOT).tmp ./cmd/bot
+	go build -ldflags="-s -w" -o $(BINARY_SCREENER).tmp ./cmd/screener
 
-# Остановка сервисов, Pull, Сборка, Запуск
 deploy:
 	@echo "[DEPLOY] Pulling latest code..."
-	git pull origin sail-both-v1
-	@echo "[DEPLOY] Stopping systemd services..."
-	sudo systemctl stop $(SERVICES)
+	git pull origin main
 	@make build
-	@echo "[DEPLOY] Starting systemd services..."
+	@echo "[DEPLOY] Compilation successful. Swapping binaries and restarting services..."
+	sudo systemctl stop $(SERVICES)
+	mv $(BINARY_BOT).tmp $(BINARY_BOT)
+	mv $(BINARY_SCREENER).tmp $(BINARY_SCREENER)
 	sudo systemctl start $(SERVICES)
 	@echo "[DEPLOY] Deployment successful!"
 
