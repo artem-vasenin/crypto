@@ -16,12 +16,25 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type ExecutionLog struct {
+	Symbol     string    `json:"symbol"`
+	Side       string    `json:"side"`
+	ExecPrice  float64   `json:"execPrice"`
+	ExecQty    float64   `json:"execQty"`
+	ExecFee    float64   `json:"execFee"`
+	OrderType  string    `json:"orderType"`
+	ExecType   string    `json:"execType"`
+	ClosedSize float64   `json:"closedSize"`
+	ExecTime   time.Time `json:"execTime"`
+}
+
 type WSEngine struct {
 	apiKey          string
 	apiSecret       string
 	testnet         bool
 	onPosClosed     func(symbol string)
 	onBalanceUpdate func(balance float64)
+	onExecution     func(exec ExecutionLog)
 
 	publicConn  *websocket.Conn
 	privateConn *websocket.Conn
@@ -33,13 +46,20 @@ type WSEngine struct {
 	privConnMu sync.Mutex
 }
 
-func NewWSEngine(apiKey, apiSecret string, testnet bool, onPosClosed func(string), onBalanceUpdate func(float64)) *WSEngine {
+func NewWSEngine(
+	apiKey, apiSecret string,
+	testnet bool,
+	onPosClosed func(string),
+	onBalanceUpdate func(float64),
+	onExecution func(ExecutionLog),
+) *WSEngine {
 	return &WSEngine{
 		apiKey:          apiKey,
 		apiSecret:       apiSecret,
 		testnet:         testnet,
 		onPosClosed:     onPosClosed,
 		onBalanceUpdate: onBalanceUpdate,
+		onExecution:     onExecution,
 		prices:          make(map[string]float64),
 		subscribed:      make(map[string]bool),
 	}
@@ -204,10 +224,9 @@ func (w *WSEngine) connectAndReadPrivate(ctx context.Context, url string) {
 		w.privateConn = conn
 		w.privConnMu.Unlock()
 
-		// Подписка на position И wallet
 		subReq := map[string]interface{}{
 			"op":   "subscribe",
-			"args": []string{"position", "wallet"},
+			"args": []string{"position", "wallet", "execution"},
 		}
 		_ = conn.WriteJSON(subReq)
 
@@ -273,6 +292,42 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 							}
 						}
 					}
+				}
+			}
+		}
+
+	case "execution":
+		var execData []struct {
+			Symbol     string `json:"symbol"`
+			Side       string `json:"side"`
+			ExecPrice  string `json:"execPrice"`
+			ExecQty    string `json:"execQty"`
+			ExecFee    string `json:"execFee"`
+			OrderType  string `json:"orderType"`
+			ExecType   string `json:"execType"`
+			ClosedSize string `json:"closedSize"`
+			ExecTime   string `json:"execTime"`
+		}
+		if err := json.Unmarshal(base.Data, &execData); err == nil {
+			for _, exec := range execData {
+				closedSz, _ := strconv.ParseFloat(exec.ClosedSize, 64)
+				if closedSz > 0 && w.onExecution != nil {
+					price, _ := strconv.ParseFloat(exec.ExecPrice, 64)
+					qty, _ := strconv.ParseFloat(exec.ExecQty, 64)
+					fee, _ := strconv.ParseFloat(exec.ExecFee, 64)
+					tsMS, _ := strconv.ParseInt(exec.ExecTime, 10, 64)
+
+					w.onExecution(ExecutionLog{
+						Symbol:     exec.Symbol,
+						Side:       exec.Side,
+						ExecPrice:  price,
+						ExecQty:    qty,
+						ExecFee:    fee,
+						OrderType:  exec.OrderType,
+						ExecType:   exec.ExecType,
+						ClosedSize: closedSz,
+						ExecTime:   time.UnixMilli(tsMS).UTC(),
+					})
 				}
 			}
 		}

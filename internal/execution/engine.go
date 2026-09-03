@@ -58,7 +58,14 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		targetSide:       targetSide,
 	}
 
-	e.wsEngine = NewWSEngine(cfg.ApiKey, cfg.ApiSecret, cfg.Testnet, e.handlePositionClosedWS, e.handleBalanceUpdateWS)
+	e.wsEngine = NewWSEngine(
+		cfg.ApiKey,
+		cfg.ApiSecret,
+		cfg.Testnet,
+		e.handlePositionClosedWS,
+		e.handleBalanceUpdateWS,
+		e.handleExecutionWS,
+	)
 	return e
 }
 
@@ -68,6 +75,27 @@ func (e *Engine) handleBalanceUpdateWS(balance float64) {
 	e.cachedBalance = balance
 	e.lastBalanceCheck = time.Now()
 	log.Printf("[WS BALANCE] Push update: Available USDT: %.2f USD", balance)
+}
+
+func (e *Engine) handleExecutionWS(exec ExecutionLog) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	pos, exists := e.positions[exec.Symbol]
+	estimatedPnL := 0.0
+
+	if exists && pos.EntryPrice > 0 {
+		if pos.Side == "Buy" {
+			estimatedPnL = (exec.ExecPrice - pos.EntryPrice) * exec.ClosedSize
+		} else if pos.Side == "Sell" {
+			estimatedPnL = (pos.EntryPrice - exec.ExecPrice) * exec.ClosedSize
+		}
+	}
+
+	netPnL := estimatedPnL - exec.ExecFee
+
+	log.Printf("[TRADE CLOSED] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Est. Net PnL: %.4f USDT | ExecType: %s | OrderType: %s",
+		exec.Symbol, exec.Side, exec.ClosedSize, pos.EntryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType, exec.OrderType)
 }
 
 func (e *Engine) InitWebSocket(ctx context.Context) error {
@@ -206,7 +234,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	// Адаптивный расчет SL
 	slPct := 0.018
 	slDist := currentPrice * slPct
 	slPrice := 0.0
