@@ -404,26 +404,12 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
+	// ВЫЗОВ ОТРЕФАКТОРЕННОГО РАСЧЁТА ОБЪЁМА
 	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
-
-	riskPerCoin := math.Abs(currentPrice - slPrice)
-	if riskPerCoin <= 0 {
-		return fmt.Errorf("invalid risk distance for %s", c.Symbol)
-	}
-
-	e.mu.Lock()
-	maxRiskUSD := math.Min(e.cachedBalance*0.015, 1.5)
-	e.mu.Unlock()
-
-	rawRiskQty := maxRiskUSD / riskPerCoin
-	maxNotionalAllowed := e.cfg.MarginPerTradeUSD * float64(targetLeverage)
-	maxQtyAllowed := maxNotionalAllowed / currentPrice
-
-	finalQty := math.Min(rawRiskQty, maxQtyAllowed)
-	qty := CalculatePositionQty(finalQty*currentPrice/float64(targetLeverage), targetLeverage, currentPrice, qtyStep, minQty, minNotional)
+	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, currentPrice, qtyStep, minQty, minNotional)
 
 	if qty <= 0 {
-		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
+		return fmt.Errorf("calculated qty (0) is invalid for %s (minQty: %f, minNotional: %f)", c.Symbol, minQty, minNotional)
 	}
 
 	e.mu.Lock()
@@ -891,7 +877,6 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
-		"symbol":      symbol,
 		"stopLoss":    FormatStep(sl, tickSize),
 		"positionIdx": 0,
 	}
