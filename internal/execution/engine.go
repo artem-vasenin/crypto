@@ -512,22 +512,32 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	if pos.Side == "Buy" {
 		if currentPrice > pos.HighestPrice {
 			pos.HighestPrice = currentPrice
-			newSL := RoundToStep(currentPrice*(1-(e.cfg.TrailingPct/100)), tickSize)
-			if newSL > pos.StopLoss && math.Abs(newSL-pos.StopLoss) >= tickSize {
-				pos.StopLoss = newSL
-				updatedSL = newSL
-				shouldUpdate = true
-			}
+		}
+
+		newSL := RoundToStep(pos.HighestPrice*(1-(e.cfg.TrailingPct/100)), tickSize)
+		if pos.StopLoss > 0 && newSL <= pos.StopLoss {
+			return
+		}
+
+		if newSL > pos.StopLoss && math.Abs(newSL-pos.StopLoss) >= tickSize {
+			pos.StopLoss = newSL
+			updatedSL = newSL
+			shouldUpdate = true
 		}
 	} else if pos.Side == "Sell" {
-		if currentPrice < pos.LowestPrice || pos.LowestPrice == 0 {
+		if pos.LowestPrice == 0 || currentPrice < pos.LowestPrice {
 			pos.LowestPrice = currentPrice
-			newSL := RoundToStep(currentPrice*(1+(e.cfg.TrailingPct/100)), tickSize)
-			if (pos.StopLoss == 0 || newSL < pos.StopLoss) && math.Abs(newSL-pos.StopLoss) >= tickSize {
-				pos.StopLoss = newSL
-				updatedSL = newSL
-				shouldUpdate = true
-			}
+		}
+
+		newSL := RoundToStep(pos.LowestPrice*(1+(e.cfg.TrailingPct/100)), tickSize)
+		if pos.StopLoss > 0 && newSL >= pos.StopLoss {
+			return
+		}
+
+		if (pos.StopLoss == 0 || newSL < pos.StopLoss) && math.Abs(newSL-pos.StopLoss) >= tickSize {
+			pos.StopLoss = newSL
+			updatedSL = newSL
+			shouldUpdate = true
 		}
 	}
 
@@ -874,7 +884,6 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 	return res.Result.OrderId, nil
 }
 
-// ФИКСИРОВАННЫЙ МЕТОД: Добавлено поле "symbol"
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
