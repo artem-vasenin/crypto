@@ -874,7 +874,7 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 	return res.Result.OrderId, nil
 }
 
-// ФИКСИРОВАННЫЙ МЕТОД: Добавлено обязательное поле "symbol"
+// ФИКСИРОВАННЫЙ МЕТОД: Добавлено поле "symbol"
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
