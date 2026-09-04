@@ -249,7 +249,6 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			// Если за 60 минут цена не дошла до TP (PnL < 0.8%), принудительно закрываем флет/микроубыток
 			if pnlPct < 0.8 {
 				log.Printf("[TIME-STOP FORCE] Liquidating stale position %s %s (Hold Time: %s, PnL: %.2f%%)",
 					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
@@ -433,7 +432,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	tpDist := math.Max(actualRiskDist*1.8, minTPDist)
 	tpPrice := 0.0
 
-	// СТРОГАЯ ВАЛИДАЦИЯ ТЕЙК-ПРОФИТА ПО НАПРАВЛЕНИЮ
 	if side == "Buy" {
 		tpPrice = currentPrice + tpDist
 		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < tpPrice {
@@ -512,7 +510,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	feeBufferPct := 0.0012 // Буфер на покрытие Taker-комиссии (0.12%)
+	feeBufferPct := 0.0012 // Резерв на покрытие Taker-комиссии (0.12%)
 	updatedSL := 0.0
 	shouldUpdate := false
 
@@ -523,17 +521,17 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		maxProfitPct := (pos.HighestPrice - pos.EntryPrice) / pos.EntryPrice * 100.0
 
-		// ФАЗА 1: Блокировка подтягивания стопа до достижения +1.0% профита
+		// ФАЗА 1: Защитный замок. Подтягивание заблокировано до роста +1.0% (фиксация от шума)
 		if maxProfitPct < 1.0 {
 			return
 		}
 
 		newSL := 0.0
-		// ФАЗА 2: Профит 1.0% - 1.8% -> Фиксация безубытка с учетом комиссий
+		// ФАЗА 2: Профит 1.0% - 1.8% -> Безубыток + Fee
 		if maxProfitPct >= 1.0 && maxProfitPct < 1.8 {
 			newSL = RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
 		} else {
-			// ФАЗА 3: Профит >= 1.8% -> Динамический скользящий трейлинг
+			// ФАЗА 3: Динамический Trailing
 			trailingDist := pos.HighestPrice * (e.cfg.TrailingPct / 100.0)
 			newSL = RoundToStep(pos.HighestPrice-trailingDist, tickSize)
 
@@ -543,7 +541,6 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 			}
 		}
 
-		// МОНОТОННОСТЬ: Стоп может только расти
 		if newSL > pos.StopLoss && math.Abs(newSL-pos.StopLoss) >= tickSize {
 			pos.StopLoss = newSL
 			updatedSL = newSL
@@ -557,27 +554,26 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		maxProfitPct := (pos.EntryPrice - pos.LowestPrice) / pos.EntryPrice * 100.0
 
-		// ФАЗА 1: Блокировка подтягивания стопа до достижения +1.0% профита
+		// ФАЗА 1: Защитный замок для Шорта
 		if maxProfitPct < 1.0 {
 			return
 		}
 
 		newSL := 0.0
-		// ФАЗА 2: Профит 1.0% - 1.8% -> Фиксация безубытка с учетом комиссий
+		// ФАЗА 2: Безубыток
 		if maxProfitPct >= 1.0 && maxProfitPct < 1.8 {
 			newSL = RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
 		} else {
-			// ФАЗА 3: Профит >= 1.8% -> Динамический скользящий трейлинг
+			// ФАЗА 3: Динамический Trailing
 			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
 			newSL = RoundToStep(pos.LowestPrice+trailingDist, tickSize)
 
 			maxSL := RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
 			if newSL > maxSL {
-				newSL = maxSL
+				maxSL = newSL
 			}
 		}
 
-		// МОНОТОННОСТЬ: Стоп для Шорта может только снижаться
 		if (pos.StopLoss == 0 || newSL < pos.StopLoss) && math.Abs(newSL-pos.StopLoss) >= tickSize {
 			pos.StopLoss = newSL
 			updatedSL = newSL

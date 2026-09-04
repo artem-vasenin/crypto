@@ -20,8 +20,9 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive/invalid volatility"}
 	}
 
-	if c.OrderBook.ImbalancePct < -20.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook heavily ask-dominated"}
+	// HARD GATE: Запрет покупок при доминировании продавцов в стакане (Ask-dominated)
+	if c.OrderBook.ImbalancePct < -15.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook heavily ask-dominated (imbalance < -15%)"}
 	}
 
 	// HARD GATE: Покупка разрешена ТОЛЬКО в нижней трети канала (на ретесте/откате)
@@ -50,8 +51,6 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	score := 0.0
 
 	// 2. SCORING (Оценка качества отката)
-	// Переменная oiUp гарантированно true благодаря Hard Gate выше.
-	// Проверяем только направление движения 24h цены для подтверждения тренда.
 	if priceUp {
 		score += 30 // New Money (24h Price UP + Подтвержденный приток OI)
 	}
