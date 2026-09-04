@@ -249,8 +249,6 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			// Фильтр комиссий: ликвидируем по Time-Stop ТОЛЬКО если профит компенсирует Taker Fee (>= +0.15%)
-			// ИЛИ если реальный убыток превышает -0.6% (убираем срез при нераскрывшемся движении в диапазоне [-0.6%, +0.15%])
 			if (pnlPct >= 0.15 && pnlPct < 0.8) || (pnlPct <= -0.6 && pnlPct > -1.1) {
 				log.Printf("[TIME-STOP] Liquidating stale position %s %s (Hold Time: %s, PnL: %.2f%%)",
 					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
@@ -876,9 +874,11 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 	return res.Result.OrderId, nil
 }
 
+// ФИКСИРОВАННЫЙ МЕТОД: Добавлено обязательное поле "symbol"
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
+		"symbol":      symbol,
 		"stopLoss":    FormatStep(sl, tickSize),
 		"positionIdx": 0,
 	}
