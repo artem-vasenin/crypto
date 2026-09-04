@@ -249,8 +249,9 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			if (pnlPct >= 0.15 && pnlPct < 0.8) || (pnlPct <= -0.6 && pnlPct > -1.1) {
-				log.Printf("[TIME-STOP] Liquidating stale position %s %s (Hold Time: %s, PnL: %.2f%%)",
+			// Если за 60 минут цена не дошла до TP (PnL < 0.8%), принудительно закрываем флет/микроубыток
+			if pnlPct < 0.8 {
+				log.Printf("[TIME-STOP FORCE] Liquidating stale position %s %s (Hold Time: %s, PnL: %.2f%%)",
 					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
 
 				go func(sym, side string, qty float64) {
