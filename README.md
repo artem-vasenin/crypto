@@ -179,6 +179,33 @@ journalctl -u bot-long -u bot-short -n 4 -o cat | grep "SUMMARY"
 journalctl -u bot-long -u bot-short -n 200 -o cat | grep -E "\[TRADE CLOSED|REST RESTORE\]"
 ```
 
+### Снова логи по торговле
+Выгрузка всех сделок и событий (SL, TP, Time-Stop)
+Основной дамп торговых событий за последние 6 часов (открытия, закрытия, причины выходов):
+```bash
+journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[SUCCESS\]|\[TRADE CLOSED|TIME-STOP|\[POS MONITOR\]"
+```
+
+Сводка по балансу, активным слотам и uPnL
+Проверка текущего состояния депо и загрузки слотов $2/2$:
+```bash
+journalctl -u bot-long -u bot-short -n 10 -o cat | grep "SUMMARY"
+```
+
+Проверка скрытых ошибок API и проскальзываний
+Дамп сетевых отвалов, ошибок гидратации лота/нотионала и отвергнутых ордеров:
+```bash
+journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[ERROR\]|\[WARN\]|rejected|failed"
+```
+
+Комплексный пайплайн (Всё в один клик)
+Если хочешь снять полную картину одним запуском:
+```bash
+echo "=== SUMMARY ===" && journalctl -u bot-long -u bot-short -n 4 -o cat | grep "SUMMARY" && \
+echo -e "\n=== TRADES & STOPS (LAST 6H) ===" && journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[SUCCESS\]|\[TRADE CLOSED|TIME-STOP" && \
+echo -e "\n=== ERRORS ===" && journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[ERROR\]|rejected"
+```
+
 ## Deploy
 ```bash
 deploy
