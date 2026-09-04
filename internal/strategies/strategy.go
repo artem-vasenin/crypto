@@ -31,6 +31,12 @@ func New(name string) (Strategy, error) {
 		return Long{}, nil
 	case "short":
 		return Short{}, nil
+	case "long-grid":
+		return LongGrid{}, nil
+	case "short-grid":
+		return ShortGrid{}, nil
+	case "neutral-grid":
+		return NeutralGrid{}, nil
 	default:
 		return nil, fmt.Errorf("unknown strategy: %s", name)
 	}
