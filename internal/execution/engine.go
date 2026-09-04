@@ -432,15 +432,20 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	tpDist := math.Max(actualRiskDist*1.8, minTPDist)
 	tpPrice := 0.0
 
+	// СТРОГАЯ ВАЛИДАЦИЯ ТЕЙК-ПРОФИТА ПО НАПРАВЛЕНИЮ
 	if side == "Buy" {
 		tpPrice = currentPrice + tpDist
-		if c.Levels.NearestResistance > (currentPrice+minTPDist) && c.Levels.NearestResistance < tpPrice {
-			tpPrice = c.Levels.NearestResistance
+		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < tpPrice {
+			if (c.Levels.NearestResistance - currentPrice) >= minTPDist {
+				tpPrice = c.Levels.NearestResistance
+			}
 		}
 	} else {
 		tpPrice = currentPrice - tpDist
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < (currentPrice-minTPDist) && c.Levels.NearestSupport > tpPrice {
-			tpPrice = c.Levels.NearestSupport
+		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > tpPrice {
+			if (currentPrice - c.Levels.NearestSupport) >= minTPDist {
+				tpPrice = c.Levels.NearestSupport
+			}
 		}
 	}
 	tpPrice = RoundToStep(tpPrice, tickSize)
