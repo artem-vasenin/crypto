@@ -49,13 +49,11 @@ func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeve
 	return finalLeverage
 }
 
-// CalculatePositionQty рассчитывает объем позиции с гарантированным запасом 5% над minNotional Bybit
 func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQty, minNotional float64) float64 {
 	if price <= 0 || leverage <= 0 || marginUSD <= 0 || qtyStep <= 0 {
 		return 0
 	}
 
-	// Задаем жесткий нижний порог нотионала не менее 5.25 USDT
 	targetMinNotional := math.Max(minNotional*1.05, 5.25)
 
 	targetNotional := marginUSD * float64(leverage)
@@ -70,7 +68,6 @@ func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQt
 		qty = minQty
 	}
 
-	// Повторная проверка стоимости после округления по qtyStep
 	if (qty * price) < targetMinNotional {
 		qty = RoundToStep((targetMinNotional/price)*1.02, qtyStep)
 	}
@@ -136,7 +133,8 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) 
 		}
 		distPct = (tpPrice - entryPrice) / entryPrice * 100.0
 	} else if strings.EqualFold(side, "Sell") {
-		if tpPrice <= entryPrice {
+		// ИСПРАВЛЕНО: Тейк-профит для короткой позиции должен быть строго ниже цены входа
+		if tpPrice >= entryPrice {
 			return false
 		}
 		distPct = (entryPrice - tpPrice) / entryPrice * 100.0
