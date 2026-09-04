@@ -19,7 +19,7 @@
   },
   "execution": {
     "testnet": false,
-    "max_leverage": 1,
+    "max_leverage": 2,
     "margin_per_trade_usd": 3.0,
     "max_total_margin_usd": 12.0,
     "max_active_positions": 2,
