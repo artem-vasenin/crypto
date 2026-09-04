@@ -44,6 +44,9 @@ type WSEngine struct {
 	subscribed map[string]bool
 	pubConnMu  sync.Mutex
 	privConnMu sync.Mutex
+
+	btcBase15mPrice float64
+	lastBTCReset    time.Time
 }
 
 func NewWSEngine(
@@ -62,6 +65,7 @@ func NewWSEngine(
 		onExecution:     onExecution,
 		prices:          make(map[string]float64),
 		subscribed:      make(map[string]bool),
+		lastBTCReset:    time.Now(),
 	}
 }
 
@@ -72,11 +76,27 @@ func (w *WSEngine) GetLatestPrice(symbol string) (float64, bool) {
 	return price, exists && price > 0
 }
 
+func (w *WSEngine) GetBTCTrend15m() (float64, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	btcPrice, exists := w.prices["BTCUSDT"]
+	if !exists || btcPrice <= 0 || w.btcBase15mPrice <= 0 {
+		return 0, false
+	}
+
+	changePct := (btcPrice - w.btcBase15mPrice) / w.btcBase15mPrice * 100.0
+	return changePct, true
+}
+
 func (w *WSEngine) StartPublicTickerStream(ctx context.Context) error {
 	url := "wss://stream.bybit.com/v5/public/linear"
 	if w.testnet {
 		url = "wss://stream-testnet.bybit.com/v5/public/linear"
 	}
+
+	// Автоматически подписываемся на BTCUSDT для межрыночной фильтрации
+	_ = w.SubscribeTicker("BTCUSDT")
 
 	go w.connectAndReadPublic(ctx, url)
 	return nil
@@ -127,6 +147,13 @@ func (w *WSEngine) connectAndReadPublic(ctx context.Context, url string) {
 				if price, err := strconv.ParseFloat(msg.Data.LastPrice, 64); err == nil && price > 0 {
 					w.mu.Lock()
 					w.prices[msg.Data.Symbol] = price
+
+					if msg.Data.Symbol == "BTCUSDT" {
+						if w.btcBase15mPrice == 0 || time.Since(w.lastBTCReset) >= 15*time.Minute {
+							w.btcBase15mPrice = price
+							w.lastBTCReset = time.Now()
+						}
+					}
 					w.mu.Unlock()
 				}
 			}
@@ -350,7 +377,6 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 				closedSz, _ := strconv.ParseFloat(exec.ClosedSize, 64)
 				execQty, _ := strconv.ParseFloat(exec.ExecQty, 64)
 
-				// Пропускаем дальше если закрыли часть позиции ИЛИ открыли новый лот
 				if (closedSz > 0 || execQty > 0) && w.onExecution != nil {
 					price, _ := strconv.ParseFloat(exec.ExecPrice, 64)
 					fee, _ := strconv.ParseFloat(exec.ExecFee, 64)

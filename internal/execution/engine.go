@@ -290,6 +290,16 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
+	// HARD GATE: Межрыночный фильтр корреляции с Биткоином (BTC Beta Filter)
+	if btcChangePct, ok := e.wsEngine.GetBTCTrend15m(); ok {
+		if side == "Buy" && btcChangePct < -0.35 {
+			return fmt.Errorf("rejected %s Long: BTC dumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
+		}
+		if side == "Sell" && btcChangePct > 0.35 {
+			return fmt.Errorf("rejected %s Short: BTC pumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
+		}
+	}
+
 	e.mu.Lock()
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
@@ -521,17 +531,14 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		maxProfitPct := (pos.HighestPrice - pos.EntryPrice) / pos.EntryPrice * 100.0
 
-		// ФАЗА 1: Защитный замок. Подтягивание заблокировано до роста +1.0% (фиксация от шума)
 		if maxProfitPct < 1.0 {
 			return
 		}
 
 		newSL := 0.0
-		// ФАЗА 2: Профит 1.0% - 1.8% -> Безубыток + Fee
 		if maxProfitPct >= 1.0 && maxProfitPct < 1.8 {
 			newSL = RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
 		} else {
-			// ФАЗА 3: Динамический Trailing
 			trailingDist := pos.HighestPrice * (e.cfg.TrailingPct / 100.0)
 			newSL = RoundToStep(pos.HighestPrice-trailingDist, tickSize)
 
@@ -554,23 +561,20 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		maxProfitPct := (pos.EntryPrice - pos.LowestPrice) / pos.EntryPrice * 100.0
 
-		// ФАЗА 1: Защитный замок для Шорта
 		if maxProfitPct < 1.0 {
 			return
 		}
 
 		newSL := 0.0
-		// ФАЗА 2: Безубыток
 		if maxProfitPct >= 1.0 && maxProfitPct < 1.8 {
 			newSL = RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
 		} else {
-			// ФАЗА 3: Динамический Trailing
 			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
 			newSL = RoundToStep(pos.LowestPrice+trailingDist, tickSize)
 
 			maxSL := RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
 			if newSL > maxSL {
-				maxSL = newSL
+				newSL = maxSL // ИСПРАВЛЕН БАГ: ограничение newSL сверху
 			}
 		}
 
