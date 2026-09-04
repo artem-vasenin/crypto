@@ -195,7 +195,8 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 	}
 
 	for _, item := range res.Result.List {
-		if _, processed := e.processedExecs[item.OrderId]; processed {
+		dedupKey := item.Symbol + "_" + item.OrderId
+		if _, processed := e.processedExecs[dedupKey]; processed {
 			continue
 		}
 
@@ -212,7 +213,7 @@ func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
 		log.Printf("[TRADE CLOSED REST RESTORE] %s | Qty: %.4f | Entry: %.4f | Exit: %.4f | Net PnL: %.4f USDT | ExecType: %s",
 			item.Symbol, size, entry, exit, pnl, item.ExecType)
 
-		e.processedExecs[item.OrderId] = now
+		e.processedExecs[dedupKey] = now
 		e.closedHistory[item.Symbol] = pos
 		delete(e.positions, item.Symbol)
 		e.cooldowns[item.Symbol] = time.Now().Add(30 * time.Minute)
@@ -248,8 +249,10 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			if pnlPct < 0.4 && pnlPct > -0.8 {
-				log.Printf("[TIME-STOP] Liquidating stale flat position %s %s (Hold Time: %s, PnL: %.2f%%)",
+			// Фильтр комиссий: ликвидируем по Time-Stop ТОЛЬКО если профит компенсирует Taker Fee (>= +0.15%)
+			// ИЛИ если реальный убыток превышает -0.6% (убираем срез при нераскрывшемся движении в диапазоне [-0.6%, +0.15%])
+			if (pnlPct >= 0.15 && pnlPct < 0.8) || (pnlPct <= -0.6 && pnlPct > -1.1) {
+				log.Printf("[TIME-STOP] Liquidating stale position %s %s (Hold Time: %s, PnL: %.2f%%)",
 					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
 
 				go func(sym, side string, qty float64) {
@@ -404,7 +407,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
 	}
 
-	// ВЫЗОВ ОТРЕФАКТОРЕННОГО РАСЧЁТА ОБЪЁМА
 	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
 	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, currentPrice, qtyStep, minQty, minNotional)
 

@@ -24,14 +24,19 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook order imbalance heavily ask-dominated"}
 	}
 
-	// HARD GATE: Запрет входа в Long в верхней четверти канала (> 75% высоты диапазона)
-	if c.Levels.RangePositionPct > 75.0 && c.Levels.NearestResistance > 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry too close to resistance zone (>75% range)"}
+	// HARD GATE: Покупка разрешена строго в нижней и средней части канала (<= 60% высоты диапазона)
+	if c.Levels.RangePositionPct > 60.0 && c.Levels.NearestResistance > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry too close to resistance zone (>60% range)"}
 	}
 
 	// HARD GATE: Перекупленность RSI 1h
-	if c.Indicators.RSI1h >= 70.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h overbought (>= 70)"}
+	if c.Indicators.RSI1h >= 68.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h overbought (>= 68)"}
+	}
+
+	// HARD GATE: Buying Climax Filter (запрет входа на кульминации пампа)
+	if c.Market.Change24h > 12.0 && c.Indicators.VolumeRatio1h > 2.5 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "buying climax detected (24h Change > 12% & VolumeRatio > 2.5)"}
 	}
 
 	priceUp := c.Market.Change24h > 0
@@ -74,8 +79,8 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		score += 10
 	}
 
-	// Бонус за вход в нижней части канала (15% - 45%)
-	if c.Levels.RangePositionPct >= 15.0 && c.Levels.RangePositionPct <= 45.0 {
+	// Бонус за качественный откат к поддержке (15% - 40% от канала)
+	if c.Levels.RangePositionPct >= 15.0 && c.Levels.RangePositionPct <= 40.0 {
 		score += 15
 	}
 
