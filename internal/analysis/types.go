@@ -37,37 +37,56 @@ type Market struct {
 	SpreadPct    float64 `json:"spread_pct"`
 }
 type Indicators struct {
-	RSI15m        float64 `json:"rsi_15m"`
-	RSI1h         float64 `json:"rsi_1h"`
-	RSI4h         float64 `json:"rsi_4h"`
-	ATR15m        float64 `json:"atr_15m"`
-	ATR1h         float64 `json:"atr_1h"`
-	ATR4h         float64 `json:"atr_4h"`
-	ATR1hPct      float64 `json:"atr_1h_pct"`
-	ATR4hPct      float64 `json:"atr_4h_pct"`
-	VolumeRatio1h float64 `json:"volume_ratio_1h"`
+	RSI15m         float64 `json:"rsi_15m"`
+	RSI1h          float64 `json:"rsi_1h"`
+	RSI4h          float64 `json:"rsi_4h"`
+	RSI4h14d       float64 `json:"rsi_4h_14d"` // RSI за 14 дней на 4h
+	RSI4h30d       float64 `json:"rsi_4h_30d"` // RSI за 30 дней на 4h
+	ATR15m         float64 `json:"atr_15m"`
+	ATR1h          float64 `json:"atr_1h"`
+	ATR4h          float64 `json:"atr_4h"`
+	ATR4h14d       float64 `json:"atr_4h_14d"` // ATR за 14 дней
+	ATR4h30d       float64 `json:"atr_4h_30d"` // ATR за 30 дней
+	ATR1hPct       float64 `json:"atr_1h_pct"`
+	ATR4hPct       float64 `json:"atr_4h_pct"`
+	ATR4h14dPct    float64 `json:"atr_4h_14d_pct"` // ATR% за 14 дней
+	ATR4h30dPct    float64 `json:"atr_4h_30d_pct"` // ATR% за 30 дней
+	VolumeRatio1h  float64 `json:"volume_ratio_1h"`
+	VolumeRatio14d float64 `json:"volume_ratio_14d"` // объём 14д vs 7д
 }
 type Trend struct {
-	EMA20_15m           float64 `json:"ema20_15m"`
-	EMA50_15m           float64 `json:"ema50_15m"`
-	EMA200_15m          float64 `json:"ema200_15m"`
-	EMA20_1h            float64 `json:"ema20_1h"`
-	EMA50_1h            float64 `json:"ema50_1h"`
-	EMA200_1h           float64 `json:"ema200_1h"`
-	EMA20_4h            float64 `json:"ema20_4h"`
-	EMA50_4h            float64 `json:"ema50_4h"`
-	EMA200_4h           float64 `json:"ema200_4h"`
-	PriceVsEMA20_1hPct  float64 `json:"price_vs_ema20_1h_pct"`
-	PriceVsEMA50_1hPct  float64 `json:"price_vs_ema50_1h_pct"`
-	PriceVsEMA200_1hPct float64 `json:"price_vs_ema200_1h_pct"`
+	EMA20_15m              float64 `json:"ema20_15m"`
+	EMA50_15m              float64 `json:"ema50_15m"`
+	EMA200_15m             float64 `json:"ema200_15m"`
+	EMA20_1h               float64 `json:"ema20_1h"`
+	EMA50_1h               float64 `json:"ema50_1h"`
+	EMA200_1h              float64 `json:"ema200_1h"`
+	EMA20_4h               float64 `json:"ema20_4h"`
+	EMA50_4h               float64 `json:"ema50_4h"`
+	EMA200_4h              float64 `json:"ema200_4h"`
+	EMA20_4h_14d           float64 `json:"ema20_4h_14d"`  // EMA20 за 14 дней
+	EMA50_4h_14d           float64 `json:"ema50_4h_14d"`  // EMA50 за 14 дней
+	EMA200_4h_14d          float64 `json:"ema200_4h_14d"` // EMA200 за 14 дней
+	EMA20_4h_30d           float64 `json:"ema20_4h_30d"`  // EMA20 за 30 дней
+	EMA50_4h_30d           float64 `json:"ema50_4h_30d"`  // EMA50 за 30 дней
+	EMA200_4h_30d          float64 `json:"ema200_4h_30d"` // EMA200 за 30 дней
+	PriceVsEMA20_1hPct     float64 `json:"price_vs_ema20_1h_pct"`
+	PriceVsEMA50_1hPct     float64 `json:"price_vs_ema50_1h_pct"`
+	PriceVsEMA200_1hPct    float64 `json:"price_vs_ema200_1h_pct"`
+	PriceVsEMA20_4h_14dPct float64 `json:"price_vs_ema20_4h_14d_pct"`
+	PriceVsEMA50_4h_14dPct float64 `json:"price_vs_ema50_4h_14d_pct"`
 }
 type Momentum struct {
 	Change1hPct  float64 `json:"change_1h_pct"`
 	Change4hPct  float64 `json:"change_4h_pct"`
 	Change12hPct float64 `json:"change_12h_pct"`
 	Change24hPct float64 `json:"change_24h_pct"`
+	Change7dPct  float64 `json:"change_7d_pct"`  // уже есть в market, но дублируем для удобства
+	Change14dPct float64 `json:"change_14d_pct"` // изменение за 14 дней
+	Change30dPct float64 `json:"change_30d_pct"` // изменение за 30 дней
 	ROC1hPct     float64 `json:"roc_1h_pct"`
 	ROC4hPct     float64 `json:"roc_4h_pct"`
+	ROC14dPct    float64 `json:"roc_14d_pct"` // ROC за 14 дней
 }
 type Volume struct {
 	Volume5m  float64 `json:"volume_5m"`
@@ -102,6 +121,17 @@ type Levels struct {
 	PriceDiscovery    bool      `json:"price_discovery"`
 	RecentRangeHigh   float64   `json:"recent_range_high"`
 	RecentRangeLow    float64   `json:"recent_range_low"`
+	// 14-дневные уровни
+	Range14dHigh        float64 `json:"range_14d_high"`
+	Range14dLow         float64 `json:"range_14d_low"`
+	Range14dWidthPct    float64 `json:"range_14d_width_pct"`
+	Range14dPositionPct float64 `json:"range_14d_position_pct"`
+	Range14dToATR4h     float64 `json:"range_14d_to_atr_4h"`
+	// 30-дневные уровни
+	Range30dHigh        float64 `json:"range_30d_high"`
+	Range30dLow         float64 `json:"range_30d_low"`
+	Range30dWidthPct    float64 `json:"range_30d_width_pct"`
+	Range30dPositionPct float64 `json:"range_30d_position_pct"`
 }
 type Derivatives struct {
 	FundingRate           float64 `json:"funding_rate"`
