@@ -11,85 +11,66 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 	st1 := c.Structure["1h"]
 	st4 := c.Structure["4h"]
 
-	// 1. HARD GATES
+	// 1. HARD GATES (Жесткая отсечка)
 	if st1.HighState == "HH" && st1.LowState == "HL" {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h confirmed uptrend"}
 	}
 
-	if c.Indicators.ATR1hPct > 4.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive 1h volatility (ATR > 4%)"}
+	if c.Indicators.ATR1hPct > 4.0 || c.Indicators.ATR15m == 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive/invalid volatility"}
 	}
 
-	if c.OrderBook.ImbalancePct > 25.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook order imbalance heavily bid-dominated"}
+	if c.OrderBook.ImbalancePct > 20.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook heavily bid-dominated"}
 	}
 
-	// HARD GATE: Продажа разрешена строго в верхней части диапазона (>= 40% высоты диапазона)
-	if c.Levels.RangePositionPct < 40.0 && c.Levels.NearestSupport > 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry too close to support zone (<40% range)"}
+	// HARD GATE: Продажа разрешена ТОЛЬКО в верхней трети канала (на откате к сопротивлению)
+	if c.Levels.RangePositionPct < 65.0 && c.Levels.NearestSupport > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside pullback zone (<65% range position)"}
 	}
 
-	// HARD GATE: Перепроданность RSI 1h
-	if c.Indicators.RSI1h <= 32.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h oversold (<= 32)"}
+	// HARD GATE: Запрет продаж при аномальном выплеске объема (Volume Climax / Exhaustion)
+	if c.Indicators.VolumeRatio1h > 3.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "volume climax detected (possible Exhaustion)"}
 	}
 
-	// HARD GATE: Selling Climax Filter (запрет продаж на дне дампа)
-	if c.Market.Change24h < -12.0 && c.Indicators.VolumeRatio1h > 2.5 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "selling climax detected (24h Change < -12% & VolumeRatio > 2.5)"}
+	// HARD GATE: Фильтр RSI (продажа строго в диапазоне 42-60, избегаем перепроданности на дне)
+	if c.Indicators.RSI1h <= 42.0 || c.Indicators.RSI1h > 60.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h invalid for short pullback entry"}
 	}
 
 	priceDown := c.Market.Change24h < 0
-	oiDown := c.Derivatives.OpenInterestChange < 0
 	oiUp := c.Derivatives.OpenInterestChange > 0
 
-	if priceDown && oiDown && c.Market.Change24h < -2 && c.Derivatives.OpenInterestChange < -2 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "long liquidation detected (Price DOWN, OI DOWN)"}
+	// Вход строго при наличии подтвержденного притока коротких позиций (Aggressive Shorts)
+	if !oiUp || c.Derivatives.OpenInterestChange < 1.5 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient Open Interest influx (<1.5%)"}
 	}
 
 	score := 0.0
 
-	// 2. OI / PRICE MATRIX SCORING
-	if priceDown && oiUp {
-		score += 25 // Aggressive Shorts
-	} else if !priceDown && oiDown {
-		score -= 15
+	// 2. SCORING (Оценка качества отката)
+	// Переменная oiUp гарантированно true благодаря Hard Gate выше.
+	// Для шорта проверяем падение цены 24h на фоне растущего OI.
+	if priceDown {
+		score += 30 // Aggressive Shorts (24h Price DOWN + Подтвержденный приток OI)
 	}
 
-	// 3. STRUCTURE SCORING
-	if st1.HighState == "LH" {
-		score += 20
+	// Поддержка нисходящей структуры
+	if st1.HighState == "LH" || st1.LowState == "LL" {
+		score += 25
 	}
-	if st1.LowState == "LL" {
-		score += 20
-	}
-	if st4.HighState == "LH" {
-		score += 10
-	}
-	if st4.LowState == "LL" {
-		score += 10
-	}
-
-	// 4. INDICATORS & POSITION WITHIN RANGE
-	if c.Indicators.RSI1h < 50 && c.Indicators.RSI1h > 35 {
-		score += 10
-	}
-
-	if c.Indicators.VolumeRatio1h > 1.1 {
-		score += 10
-	}
-
-	// Бонус за вход в верхней части канала (60% - 85%)
-	if c.Levels.RangePositionPct >= 60.0 && c.Levels.RangePositionPct <= 85.0 {
+	if st4.HighState == "LH" || st4.LowState == "LL" {
 		score += 15
 	}
 
-	if c.OrderBook.ImbalancePct < -15.0 {
-		score += 10
+	// Идеальная геометрия отката к сопротивлению (75% - 90% высоты диапазона)
+	if c.Levels.RangePositionPct >= 75.0 && c.Levels.RangePositionPct <= 90.0 {
+		score += 20
 	}
 
-	if c.Derivatives.FundingRate > 0 {
-		score += 5
+	if c.OrderBook.ImbalancePct < -10.0 {
+		score += 10
 	}
 
 	score = clamp(score)
@@ -97,6 +78,6 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 	return models.StrategyResult{
 		Score:  score,
 		Status: status(score),
-		Reason: "directional short + safe range position + aggressive shorts",
+		Reason: "pullback to resistance + aggressive short OI expansion + structure backing",
 	}
 }
