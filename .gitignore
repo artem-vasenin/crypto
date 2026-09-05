@@ -5,3 +5,4 @@ configs/config.test.json
 .env
 .env.test
 analyzer
+screener
