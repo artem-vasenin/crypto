@@ -304,7 +304,6 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			// Увеличиваем буфер безубытка до 0.14% для 100% покрытия комиссий входа/выхода
 			feeBufferPct := 0.0014
 			if pnlPct >= 0.14 {
 				_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
@@ -347,7 +346,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	// HARD GATE 1: Межрыночный фильтр корреляции с BTC
 	if btcChangePct, ok := e.wsEngine.GetBTCTrend15m(); ok {
 		if side == "Buy" && btcChangePct < -0.35 {
 			return fmt.Errorf("rejected %s Long: BTC dumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
@@ -357,14 +355,12 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	}
 
-	// HARD GATE 2: Блокировка против часового тренда
 	if struct1h, ok := c.Structure["1h"]; ok {
 		if side == "Buy" && struct1h.HighState == "LH" && struct1h.LowState == "LL" {
 			return fmt.Errorf("rejected %s Long: 1h confirmed downtrend (LH+LL)", c.Symbol)
 		}
 	}
 
-	// HARD GATE 3: Блокировка входа в середине диапазона (Chop Zone)
 	if c.Levels.RangePositionPct > 35.0 && c.Levels.RangePositionPct < 65.0 {
 		return fmt.Errorf("rejected %s %s: entry inside middle range position (%.1f%%)", c.Symbol, side, c.Levels.RangePositionPct)
 	}
@@ -452,7 +448,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	}
 
-	// HARD GATE 4: Проверка потенциала R:R (минимальный ход до сопротивления/поддержки +2.7%)
 	minProfitDistPct := 0.027
 	if side == "Buy" {
 		if c.Levels.NearestResistance > 0 && (c.Levels.NearestResistance-currentPrice)/currentPrice < minProfitDistPct {
@@ -471,7 +466,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	// Расчет динамического Stop-Loss с обязательным отступом от 1h ATR волатильности
 	pivotLevel := c.Levels.NearestSupport
 	if side == "Sell" {
 		pivotLevel = c.Levels.NearestResistance
@@ -505,7 +499,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	}
 
-	// Расчет динамического Take-Profit с привязкой к полученному риску (R:R >= 1.5)
 	tpPrice := CalculateDynamicTakeProfit(side, currentPrice, slPrice, 1.5, tickSize)
 
 	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.5) {
@@ -587,20 +580,20 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		maxProfitPct := (pos.HighestPrice - pos.EntryPrice) / pos.EntryPrice * 100.0
 
-		if maxProfitPct < 1.0 {
+		// БЛОКИРОВКА: Игнорируем подтяжку, если чистый профит движения не достиг 1.2%
+		if maxProfitPct < 1.2 {
 			return
 		}
 
-		newSL := 0.0
-		if maxProfitPct >= 1.0 && maxProfitPct < 1.8 {
-			newSL = RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
-		} else {
-			trailingDist := pos.HighestPrice * (e.cfg.TrailingPct / 100.0)
-			newSL = RoundToStep(pos.HighestPrice-trailingDist, tickSize)
+		// Фаза 1: Фиксация чистого безубытка + комиссии (1.2% - 1.8%)
+		newSL := RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
 
-			minSL := RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
-			if newSL < minSL {
-				newSL = minSL
+		// Фаза 2: Динамический трейлинг при движении выше 1.8%
+		if maxProfitPct >= 1.8 {
+			trailingDist := pos.HighestPrice * (e.cfg.TrailingPct / 100.0)
+			dynamicSL := RoundToStep(pos.HighestPrice-trailingDist, tickSize)
+			if dynamicSL > newSL {
+				newSL = dynamicSL
 			}
 		}
 
@@ -617,20 +610,17 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		maxProfitPct := (pos.EntryPrice - pos.LowestPrice) / pos.EntryPrice * 100.0
 
-		if maxProfitPct < 1.0 {
+		if maxProfitPct < 1.2 {
 			return
 		}
 
-		newSL := 0.0
-		if maxProfitPct >= 1.0 && maxProfitPct < 1.8 {
-			newSL = RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
-		} else {
-			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
-			newSL = RoundToStep(pos.LowestPrice+trailingDist, tickSize)
+		newSL := RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
 
-			maxSL := RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
-			if newSL > maxSL {
-				newSL = maxSL
+		if maxProfitPct >= 1.8 {
+			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
+			dynamicSL := RoundToStep(pos.LowestPrice+trailingDist, tickSize)
+			if dynamicSL < newSL {
+				newSL = dynamicSL
 			}
 		}
 
@@ -987,7 +977,6 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
-		"symbol":      symbol,
 		"stopLoss":    FormatStep(sl, tickSize),
 		"positionIdx": 0,
 	}
