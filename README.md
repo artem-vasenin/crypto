@@ -310,10 +310,16 @@ cd crypto-coin-analyzer
 go test ./...
 ```
 
-Сборка:
+## Сборка:
 
+Дефолтная ОС
 ```bash
 go build -o crypto-coin-analyzer ./cmd/analyzer
+```
+
+Windows
+```bash
+GOOS=windows GOARCH=amd64 go build -o crypto-coin-analyzer.exe ./cmd/analyzer
 ```
 
 ## Запуск
