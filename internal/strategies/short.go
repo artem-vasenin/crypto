@@ -32,12 +32,17 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient ask dominance in orderbook (imbalance > -5%)"}
 	}
 
-	// HARD GATE: Продажа разрешена ТОЛЬКО в верхней трети канала
-	if c.Levels.RangePositionPct < 65.0 && c.Levels.NearestSupport > 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside pullback zone (<65% range position)"}
+	// HARD GATE: Запрет входа при аномально отрицательном Funding Rate
+	if c.Derivatives.FundingRate < -0.0003 { // < -0.03% за 8ч
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "overheated negative funding rate (<-0.03%)"}
 	}
 
-	// HARD GATE: Фильтр RSI (продажа в диапазоне 38-62)
+	// HARD GATE: Продажа разрешена строго у верхней границы (запрет продажи нижних фитилей)
+	if c.Levels.RangePositionPct < 72.0 && c.Levels.NearestSupport > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside strict pullback zone (<72% range position)"}
+	}
+
+	// HARD GATE: Фильтр RSI (продажа строго в диапазоне 38-62)
 	if c.Indicators.RSI1h <= 38.0 || c.Indicators.RSI1h > 62.0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h invalid for short pullback entry"}
 	}
@@ -63,7 +68,7 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 		score += 15
 	}
 
-	if c.Levels.RangePositionPct >= 75.0 && c.Levels.RangePositionPct <= 95.0 {
+	if c.Levels.RangePositionPct >= 80.0 && c.Levels.RangePositionPct <= 95.0 {
 		score += 20
 	}
 
