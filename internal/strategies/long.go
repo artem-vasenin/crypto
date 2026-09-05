@@ -1,7 +1,9 @@
 // internal/strategies/long.go
 package strategies
 
-import "universal-bybit-screener/models"
+import (
+	"universal-bybit-screener/models"
+)
 
 type Long struct{}
 
@@ -25,9 +27,9 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "spread exceeds 0.08% threshold"}
 	}
 
-	// HARD GATE: Запрет покупок при доминировании продавцов в стакане
-	if c.OrderBook.ImbalancePct < -15.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "orderbook heavily ask-dominated (imbalance < -15%)"}
+	// HARD GATE: Требуем реального доминирования покупателей в стакане L2 (минимум +5%)
+	if c.OrderBook.ImbalancePct < 5.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient bid dominance in orderbook (imbalance < +5%)"}
 	}
 
 	// HARD GATE: Покупка разрешена ТОЛЬКО в нижней трети канала
@@ -35,8 +37,8 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside pullback zone (>35% range position)"}
 	}
 
-	// HARD GATE: Фильтр RSI (покупка в диапазоне 38-65)
-	if c.Indicators.RSI1h >= 65.0 || c.Indicators.RSI1h < 38.0 {
+	// HARD GATE: Фильтр RSI (покупка в диапазоне 38-62, исключаем входы на локальных хаях)
+	if c.Indicators.RSI1h >= 62.0 || c.Indicators.RSI1h < 38.0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h invalid for pullback entry"}
 	}
 
@@ -65,7 +67,7 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		score += 20
 	}
 
-	if c.OrderBook.ImbalancePct > 10.0 {
+	if c.OrderBook.ImbalancePct > 15.0 {
 		score += 10
 	}
 

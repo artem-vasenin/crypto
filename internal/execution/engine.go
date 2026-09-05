@@ -618,7 +618,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		if maxProfitPct >= 1.8 {
 			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
-			dynamicSL := RoundToStep(pos.LowestPrice+trailingDist, tickSize)
+			dynamicSL := RoundToStep(pos.LowestPrice-trailingDist, tickSize)
 			if dynamicSL < newSL {
 				newSL = dynamicSL
 			}
@@ -977,6 +977,7 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
 	params := map[string]interface{}{
 		"category":    "linear",
+		"symbol":      symbol,
 		"stopLoss":    FormatStep(sl, tickSize),
 		"positionIdx": 0,
 	}
