@@ -20,6 +20,58 @@ type MarketAPI interface {
 	OrderBook(context.Context, string, int) (bybit.OrderBook, error)
 }
 
+func closes(c []bybit.Candle) []float64 {
+	x := make([]float64, len(c))
+	for i, v := range c {
+		x[i] = v.Close
+	}
+	return x
+}
+
+func vols(c []bybit.Candle) []float64 {
+	x := make([]float64, len(c))
+	for i, v := range c {
+		x[i] = v.Volume
+	}
+	return x
+}
+
+func change(c []bybit.Candle, n int) float64 {
+	v := closes(c)
+	if len(v) <= n {
+		return 0
+	}
+	return indicators.PercentChange(v, n)
+}
+
+func changeByValues(v []float64) float64 {
+	if len(v) < 2 || v[0] == 0 {
+		return 0
+	}
+	return (v[len(v)-1]/v[0] - 1.0) * 100.0
+}
+
+func pct(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return (a/b - 1.0) * 100.0
+}
+
+func ratioPct(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return (a / b) * 100.0
+}
+
+func takeLastCandles(c []bybit.Candle, n int) []bybit.Candle {
+	if len(c) <= n {
+		return c
+	}
+	return c[len(c)-n:]
+}
+
 func sumVolumes(c []bybit.Candle, n int) float64 {
 	if len(c) < n {
 		n = len(c)
@@ -31,60 +83,14 @@ func sumVolumes(c []bybit.Candle, n int) float64 {
 	return s
 }
 
-func closes(c []bybit.Candle) []float64 {
-	x := make([]float64, len(c))
-	for i, v := range c {
-		x[i] = v.Close
-	}
-	return x
-}
-func vols(c []bybit.Candle) []float64 {
-	x := make([]float64, len(c))
-	for i, v := range c {
-		x[i] = v.Volume
-	}
-	return x
-}
-func change(c []bybit.Candle, n int) float64 {
-	v := closes(c)
-	if len(v) <= n || v[len(v)-1-n] == 0 {
-		return 0
-	}
-	return indicators.PercentChange(v, n)
-}
-func changeByValues(v []float64, n int) float64 {
-	if len(v) <= n || v[len(v)-1-n] == 0 {
-		return 0
-	}
-	return (v[len(v)-1]/v[len(v)-1-n] - 1) * 100
-}
-func pct(a, b float64) float64 {
-	if b == 0 {
-		return 0
-	}
-	return (a/b - 1) * 100
-}
-func ratioPct(a, b float64) float64 {
-	if b == 0 {
-		return 0
-	}
-	return a / b * 100
-}
-
-func takeLastCandles(c []bybit.Candle, n int) []bybit.Candle {
-	if len(c) <= n {
-		return c
-	}
-	return c[len(c)-n:]
-}
-
 func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report, error) {
 	if days < 1 {
 		days = 1
 	}
 	if days > 30 {
-		days = 30 // расширяем лимит до 30 дней
+		days = 30
 	}
+
 	ticker, err := api.Ticker(ctx, symbol)
 	if err != nil {
 		return Report{}, err
@@ -101,30 +107,31 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 	if err != nil {
 		return Report{}, err
 	}
-	// Запрашиваем максимум 200 свечей 4h (33 дня)
-	// Но для 30 дней нам нужно 180 свечей (30*6)
 	c4h, err := api.Klines(ctx, symbol, "240", 200)
 	if err != nil {
 		return Report{}, err
 	}
-	c1m, err := api.Klines(ctx, symbol, "1", min(1000, days*24*60))
+
+	requested1m := min(1000, days*24*60)
+	c1m, err := api.Klines(ctx, symbol, "1", requested1m)
 	if err != nil {
 		return Report{}, err
 	}
+
 	btcTicker, err := api.Ticker(ctx, "BTCUSDT")
 	if err != nil {
 		return Report{}, err
 	}
-	btc1m, err := api.Klines(ctx, "BTCUSDT", "1", min(1000, days*24*60))
+	btc1m, err := api.Klines(ctx, "BTCUSDT", "1", requested1m)
 	if err != nil {
 		return Report{}, err
 	}
+
 	funding, _ := api.Funding(ctx, symbol, 10)
 	oi, _ := api.OpenInterest(ctx, symbol, "1h", 50)
 	ls, _ := api.LongShort(ctx, symbol, "1h", 1)
 	ob, _ := api.OrderBook(ctx, symbol, 200)
 
-	// --- Базовые индикаторы (как было) ---
 	p15, p1, p4 := closes(c15), closes(c1h), closes(c4h)
 	e15 := indicators.EMA(p15, 20)
 	e15_50 := indicators.EMA(p15, 50)
@@ -135,18 +142,19 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 	e4 := indicators.EMA(p4, 20)
 	e4_50 := indicators.EMA(p4, 50)
 	e4_200 := indicators.EMA(p4, 200)
+
 	atr15 := indicators.ATR(toIndicator(c15), 14)
 	atr1 := indicators.ATR(toIndicator(c1h), 14)
 	atr4 := indicators.ATR(toIndicator(c4h), 14)
 
-	// --- 14-дневные индикаторы (84 свечи 4h = 14 дней) ---
 	c4h14d := takeLastCandles(c4h, 84)
 	p4_14d := closes(c4h14d)
 	e4_14d_20 := indicators.EMA(p4_14d, 20)
 	e4_14d_50 := indicators.EMA(p4_14d, 50)
 	e4_14d_200 := indicators.EMA(p4_14d, 200)
-	atr4_14d := indicators.ATR(toIndicator(c4h14d), 84)
-	rsi4_14d := indicators.RSI(p4_14d, 84)
+	atr4_14d := indicators.ATR(toIndicator(c4h14d), min(14, len(c4h14d)-1))
+	rsi4_14d := indicators.RSI(p4_14d, min(14, len(p4_14d)-1))
+
 	vol14d := sumVolumes(c4h, 84)
 	vol7d := sumVolumes(c4h, 42)
 	volRatio14d := 0.0
@@ -154,14 +162,13 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 		volRatio14d = vol14d / vol7d
 	}
 
-	// --- 30-дневные индикаторы (180 свечей 4h = 30 дней) ---
 	c4h30d := takeLastCandles(c4h, 180)
 	p4_30d := closes(c4h30d)
 	e4_30d_20 := indicators.EMA(p4_30d, 20)
 	e4_30d_50 := indicators.EMA(p4_30d, 50)
 	e4_30d_200 := indicators.EMA(p4_30d, 200)
-	atr4_30d := indicators.ATR(toIndicator(c4h30d), 180)
-	rsi4_30d := indicators.RSI(p4_30d, 180)
+	atr4_30d := indicators.ATR(toIndicator(c4h30d), min(14, len(c4h30d)-1))
+	rsi4_30d := indicators.RSI(p4_30d, min(14, len(p4_30d)-1))
 
 	m := Market{
 		Price:        ticker.LastPrice,
@@ -221,11 +228,11 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 		Change12hPct: change(c1h, 12),
 		Change24hPct: change(c1h, 24),
 		Change7dPct:  change(c4h, 42),
-		Change14dPct: changeByValues(p4_14d, len(p4_14d)-1),
-		Change30dPct: changeByValues(p4_30d, len(p4_30d)-1),
+		Change14dPct: changeByValues(p4_14d),
+		Change30dPct: changeByValues(p4_30d),
 		ROC1hPct:     change(c1h, 1),
 		ROC4hPct:     change(c1h, 4),
-		ROC14dPct:    changeByValues(p4_14d, len(p4_14d)-1),
+		ROC14dPct:    changeByValues(p4_14d),
 	}
 
 	vol := Volume{
@@ -252,13 +259,14 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 		sort.Slice(oi, func(i, j int) bool { return oi[i].Time.Before(oi[j].Time) })
 		oldest, newest := oi[0].Value, oi[len(oi)-1].Value
 		if oldest != 0 {
-			der.OpenInterestChangePct = (newest/oldest - 1) * 100
+			der.OpenInterestChangePct = (newest/oldest - 1.0) * 100.0
 		}
 	}
 	if len(ls) > 0 {
 		der.LongRatio = ls[0].BuyRatio
 		der.ShortRatio = ls[0].SellRatio
 	}
+
 	order := OrderBook{
 		BidNotional:  ob.BidNotional,
 		AskNotional:  ob.AskNotional,
@@ -267,23 +275,18 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 		SpreadPct:    m.SpreadPct,
 		Levels:       ob.Levels,
 	}
+
 	btc := buildBTCContext(c1m, btc1m, btcTicker, c1h, symbol == "BTCUSDT")
 	strategies := scoreStrategies(m, ind, trend, mom, structure, levels, der, order, btc)
 
 	notes := []string{}
-	requested1m := min(1000, days*24*60)
 	if len(c1m) < requested1m {
-		notes = append(notes, fmt.Sprintf("Доступно %d из %d запрошенных 1m свечей; lead-lag рассчитан по доступной истории.", len(c1m), requested1m))
-	}
-	if days > 7 {
-		notes = append(notes, "Для периодов >7 дней 1m свечи ограничены 1000 (7 дней), но 14- и 30-дневные метрики рассчитаны по 4h свечам.")
+		notes = append(notes, fmt.Sprintf("Доступно %d из %d запрошенных 1m свечей.", len(c1m), requested1m))
 	}
 	if days > 1 {
-		notes = append(notes, "В текущей версии один запрос Bybit ограничен 1000 свечами; параметр days ограничивает запрос максимум 30 днями, но не выполняет постраничную загрузку сверх лимита API.")
+		notes = append(notes, "Запрос 1m ограничен 1000 свечами (около 16.6 часов) из-за лимита одиночного вызова Bybit V5.")
 	}
-	if symbol == "BTCUSDT" {
-		notes = append(notes, "Для BTCUSDT BTC lead-lag сравнивает инструмент с самим BTC и поэтому не является независимым сигналом.")
-	}
+
 	return Report{
 		GeneratedAt: time.Now().UTC(),
 		Exchange:    "Bybit",
@@ -302,30 +305,87 @@ func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report,
 		OrderBook:   order,
 		BTCContext:  btc,
 		Strategies:  strategies,
-		AIInstructions: AIInstructions{
-			Task: "Проанализируй, есть ли сейчас статистически и технически обоснованный сценарий LONG или SHORT по указанной монете.",
-			Rules: []string{
-				"Не принимать score как готовый торговый сигнал — проверять исходные метрики.",
-				"Учитывать одновременно 15m/1h/4h, momentum, RSI, ATR, объём, funding, OI, long/short ratio, стакан и уровни.",
-				"Отдельно проверить BTC-контекст и lead-lag: совпадает ли текущее движение монеты с BTC и есть ли исторический лаг.",
-				"Обратить внимание на 14- и 30-дневные метрики (rsi_4h_14d, atr_4h_14d, change_14d_pct, range_14d_*): они показывают глобальный тренд и перекупленность.",
-				"Если RSI_4h_14d > 80 и RSI_4h < 60 — это сигнал к скорой коррекции.",
-				"Если RSI_4h_14d < 30 и RSI_4h > 50 — сигнал к скорому импульсу вверх.",
-				"Если change_14d_pct > 40% — монета в параболическом ралли, шорт рискован.",
-				"Если change_14d_pct < -20% — монета в глубокой коррекции, лонг рискован.",
-				"Не придумывать данные, которых нет в JSON.",
-				"Если преимущества LONG/SHORT недостаточно — прямо написать WAIT.",
-			},
-			RequestedOutput: []string{
-				"Итог: LONG / SHORT / WAIT.",
-				"Уровень уверенности 0-100.",
-				"Точка или зона входа.",
-				"SL и 1-3 цели TP с объяснением.",
-				"Главный сценарий и сценарий отмены.",
-				"Какие метрики сильнее всего подтверждают решение и какие ему противоречат.",
-			},
-		},
 	}, nil
+}
+
+func alignReturns(a, b []bybit.Candle) ([]float64, []float64) {
+	if len(a) < 2 || len(b) < 2 {
+		return nil, nil
+	}
+	bReturns := make(map[time.Time]float64, len(b)-1)
+	for i := 1; i < len(b); i++ {
+		if b[i-1].Close != 0 {
+			bReturns[b[i].Time] = b[i].Close/b[i-1].Close - 1.0
+		}
+	}
+	aReturns := make([]float64, 0, len(a)-1)
+	bAligned := make([]float64, 0, len(a)-1)
+	for i := 1; i < len(a); i++ {
+		if a[i-1].Close == 0 {
+			continue
+		}
+		br, ok := bReturns[a[i].Time]
+		if !ok {
+			continue
+		}
+		aReturns = append(aReturns, a[i].Close/a[i-1].Close-1.0)
+		bAligned = append(bAligned, br)
+	}
+	if len(aReturns) < 4 {
+		return nil, nil
+	}
+	return aReturns, bAligned
+}
+
+func lagCorrAligned(aReturns, bAligned []float64, lag int) float64 {
+	if len(aReturns) < 6 || lag >= len(aReturns) {
+		return 0
+	}
+	return indicators.Correlation(aReturns[lag:], bAligned[:len(bAligned)-lag])
+}
+
+func buildBTCContext(c, btc []bybit.Candle, t bybit.Ticker, target1h []bybit.Candle, selfReference bool) BTCContext {
+	ctx := BTCContext{Price: t.LastPrice, Change24hPct: t.Price24hPct, SelfReference: selfReference}
+	btcHourly := btcTo1h(btc)
+	ctx.Change1hPct = change(btcHourly, 1)
+	ctx.Change4hPct = change(btcHourly, 4)
+
+	if selfReference {
+		ctx.Interpretation = "BTCUSDT выбран как анализируемый инструмент: BTC-контекст самоссылочен."
+		return ctx
+	}
+
+	aRet, bAligned := alignReturns(c, btc)
+	lags := []int{0, 1, 2, 3, 5, 10}
+	vals := make([]float64, len(lags))
+	for i, l := range lags {
+		vals[i] = lagCorrAligned(aRet, bAligned, l)
+	}
+
+	ctx.Corr1m0 = vals[0]
+	ctx.Corr1m1 = vals[1]
+	ctx.Corr1m2 = vals[2]
+	ctx.Corr1m3 = vals[3]
+	ctx.Corr1m5 = vals[4]
+	ctx.Corr1m10 = vals[5]
+
+	best := 0
+	bestv := vals[0]
+	for i := 1; i < len(vals); i++ {
+		if vals[i] > bestv {
+			bestv = vals[i]
+			best = lags[i]
+		}
+	}
+	ctx.BestLagMinutes = best
+	ctx.BestLagCorrelation = bestv
+
+	if len(target1h) > 4 {
+		ctx.Relative1hPct = change(target1h, 1) - change(btcHourly, 1)
+		ctx.Relative4hPct = change(target1h, 4) - change(btcHourly, 4)
+	}
+	ctx.Interpretation = fmt.Sprintf("Максимальная корреляция доходностей BTC→монета среди проверенных лагов: %d мин, corr=%.3f.", best, bestv)
+	return ctx
 }
 
 func toIndicator(c []bybit.Candle) []indicators.Candle {
@@ -335,18 +395,21 @@ func toIndicator(c []bybit.Candle) []indicators.Candle {
 	}
 	return o
 }
+
 func last(v []float64) float64 {
 	if len(v) == 0 {
 		return 0
 	}
 	return v[len(v)-1]
 }
+
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
+
 func sumRecent(c []bybit.Candle, n int) float64 {
 	if len(c) == 0 {
 		return 0
@@ -360,13 +423,16 @@ func sumRecent(c []bybit.Candle, n int) float64 {
 	}
 	return s
 }
+
 func volumeRatioRecent(c []bybit.Candle, n, long int) float64 {
-	if len(c) < long {
+	if len(c) < long || long == 0 {
 		return 0
 	}
 	return indicators.Mean(volumes(c[len(c)-n:])) / indicators.Mean(volumes(c[len(c)-long:]))
 }
+
 func volumes(c []bybit.Candle) []float64 { return vols(c) }
+
 func avgFundingSince(f []bybit.Funding, since time.Time) float64 {
 	filtered := make([]bybit.Funding, 0, len(f))
 	for _, x := range f {
@@ -436,7 +502,6 @@ func buildLevels(c1h, c4h []bybit.Candle, atr1h, atr4h, price float64) Levels {
 		return Levels{}
 	}
 
-	// --- 7-дневные уровни (как было) ---
 	window := 120
 	if len(c1h) < window {
 		window = len(c1h)
@@ -467,23 +532,22 @@ func buildLevels(c1h, c4h []bybit.Candle, atr1h, atr4h, price float64) Levels {
 	}
 	sort.Float64s(res)
 	sort.Sort(sort.Reverse(sort.Float64Slice(sup)))
+
 	nr, ns := 0.0, 0.0
 	if len(res) > 0 {
 		nr = res[0]
 	}
-	priceDiscovery := len(res) == 0 && price >= hi
 	if len(sup) > 0 {
 		ns = sup[0]
 	}
+
 	width := pct(hi, lo)
 	pos := 0.0
 	if hi > lo {
-		pos = (price - lo) / (hi - lo) * 100
+		pos = (price - lo) / (hi - lo) * 100.0
 	}
 
-	// --- 14-дневные уровни ---
 	levels14d := buildLevelsFromCandles(c4h, 84, price)
-	// --- 30-дневные уровни ---
 	levels30d := buildLevelsFromCandles(c4h, 180, price)
 
 	return Levels{
@@ -499,7 +563,7 @@ func buildLevels(c1h, c4h []bybit.Candle, atr1h, atr4h, price float64) Levels {
 			}
 			return (hi - lo) / atr1h
 		}(),
-		PriceDiscovery:      priceDiscovery,
+		PriceDiscovery:      len(res) == 0 && price >= hi,
 		RecentRangeHigh:     hi,
 		RecentRangeLow:      lo,
 		Range14dHigh:        levels14d.High,
@@ -537,11 +601,11 @@ func buildLevelsFromCandles(c []bybit.Candle, window int, price float64) rangeLe
 	}
 	width := 0.0
 	if lo > 0 {
-		width = (hi/lo - 1) * 100
+		width = (hi/lo - 1.0) * 100.0
 	}
 	pos := 0.0
 	if hi > lo {
-		pos = (price - lo) / (hi - lo) * 100
+		pos = (price - lo) / (hi - lo) * 100.0
 	}
 	atr := indicators.ATR(toIndicator(cs), 14)
 	toATR := 0.0
@@ -556,47 +620,6 @@ func tail(v []float64, n int) []float64 {
 		return v
 	}
 	return v[len(v)-n:]
-}
-
-func buildBTCContext(c, btc []bybit.Candle, t bybit.Ticker, target1h []bybit.Candle, selfReference bool) BTCContext {
-	ctx := BTCContext{Price: t.LastPrice, Change24hPct: t.Price24hPct, SelfReference: selfReference}
-	btcHourly := btcTo1h(btc)
-	ctx.Change1hPct = change(btcHourly, 1)
-	ctx.Change4hPct = change(btcHourly, 4)
-
-	if selfReference {
-		ctx.Interpretation = "BTCUSDT выбран как анализируемый инструмент: BTC-контекст является самоссылочным и не используется как независимый lead-lag сигнал."
-		return ctx
-	}
-
-	cr := alignReturns(c, btc)
-	lags := []int{0, 1, 2, 3, 5, 10}
-	vals := make([]float64, len(lags))
-	for i, l := range lags {
-		vals[i] = lagCorr(cr, l)
-	}
-	ctx.Corr1m0 = vals[0]
-	ctx.Corr1m1 = vals[1]
-	ctx.Corr1m2 = vals[2]
-	ctx.Corr1m3 = vals[3]
-	ctx.Corr1m5 = vals[4]
-	ctx.Corr1m10 = vals[5]
-	best := 0
-	bestv := vals[0]
-	for i := 1; i < len(vals); i++ {
-		if vals[i] > bestv {
-			bestv = vals[i]
-			best = lags[i]
-		}
-	}
-	ctx.BestLagMinutes = best
-	ctx.BestLagCorrelation = bestv
-	if len(target1h) > 4 {
-		ctx.Relative1hPct = change(target1h, 1) - change(btcHourly, 1)
-		ctx.Relative4hPct = change(target1h, 4) - change(btcHourly, 4)
-	}
-	ctx.Interpretation = fmt.Sprintf("Максимальная корреляция доходностей BTC→монета среди проверенных лагов: %d мин, corr=%.3f. Это статистический контекст, а не гарантия догоняющего движения.", best, bestv)
-	return ctx
 }
 
 func btcTo1h(c []bybit.Candle) []bybit.Candle {
@@ -622,63 +645,10 @@ func btcTo1h(c []bybit.Candle) []bybit.Candle {
 	}
 	return out
 }
-func alignReturns(a, b []bybit.Candle) []float64 {
-	if len(a) < 2 || len(b) < 2 {
-		return nil
-	}
-	bReturns := make(map[time.Time]float64, len(b)-1)
-	for i := 1; i < len(b); i++ {
-		if b[i-1].Close != 0 {
-			bReturns[b[i].Time] = b[i].Close/b[i-1].Close - 1
-		}
-	}
-	aReturns := make([]float64, 0, len(a)-1)
-	bAligned := make([]float64, 0, len(a)-1)
-	for i := 1; i < len(a); i++ {
-		if a[i-1].Close == 0 {
-			continue
-		}
-		br, ok := bReturns[a[i].Time]
-		if !ok {
-			continue
-		}
-		aReturns = append(aReturns, a[i].Close/a[i-1].Close-1)
-		bAligned = append(bAligned, br)
-	}
-	if len(aReturns) < 4 {
-		return nil
-	}
-	out := make([]float64, 0, len(aReturns)*2)
-	for i := range aReturns {
-		out = append(out, aReturns[i], bAligned[i])
-	}
-	return out
-}
-
-func lagCorr(pairs []float64, lag int) float64 {
-	if len(pairs) < 6 {
-		return 0
-	}
-	a := make([]float64, 0, len(pairs)/2)
-	b := make([]float64, 0, len(pairs)/2)
-	for i := 0; i+1 < len(pairs); i += 2 {
-		a = append(a, pairs[i])
-		b = append(b, pairs[i+1])
-	}
-	if lag >= len(a) {
-		return 0
-	}
-	return indicators.Correlation(a[lag:], b[:len(b)-lag])
-}
 
 func scoreStrategies(m Market, ind Indicators, tr Trend, mom Momentum, s Structure, l Levels, d Derivatives, o OrderBook, btc BTCContext) Strategies {
-	long := 0
-	short := 0
-	lg := 0
-	sg := 0
-	ng := 0
+	long, short, lg, sg, ng := 0, 0, 0, 0, 0
 
-	// --- Существующие проверки ---
 	if tr.EMA20_1h > tr.EMA50_1h {
 		long += 15
 	} else {
@@ -771,89 +741,66 @@ func scoreStrategies(m Market, ind Indicators, tr Trend, mom Momentum, s Structu
 		}
 	}
 
-	// --- НОВЫЕ проверки на 14-дневные метрики ---
-
-	// 1. Глобальная перекупленность → сигнал к коррекции (шорт)
 	if ind.RSI4h14d > 80 && ind.RSI4h < 70 {
-		short += 15 // RSI на 14д перекуплен, а на 7д уже остывает — дивергенция
+		short += 15
 	}
 	if ind.RSI4h14d > 80 && ind.RSI4h > 80 {
-		short += 5 // экстремальная перекупленность на всех ТФ
+		short += 5
 	}
-
-	// 2. Глобальная перепроданность → сигнал к импульсу (лонг)
 	if ind.RSI4h14d < 30 && ind.RSI4h > 50 {
-		long += 15 // RSI на 14д перепродан, на 7д уже разворачивается
+		long += 15
 	}
 	if ind.RSI4h14d < 30 && ind.RSI4h < 30 {
-		long += 5 // экстремальная перепроданность
+		long += 5
 	}
-
-	// 3. Сильный долгосрочный тренд
 	if mom.Change14dPct > 20 && mom.Change4hPct > 0 {
-		long += 10 // сильный бычий импульс за 14 дней
+		long += 10
 	}
 	if mom.Change14dPct < -20 && mom.Change4hPct < 0 {
-		short += 10 // сильный медвежий импульс за 14 дней
+		short += 10
 	}
-
-	// 4. Тренд ускоряется (EMA20_4h_14d vs EMA50_4h_14d)
 	if tr.EMA20_4h_14d > tr.EMA50_4h_14d && tr.EMA20_4h > tr.EMA50_4h {
-		long += 10 // тренд ускоряется на всех горизонтах
+		long += 10
 	}
 	if tr.EMA20_4h_14d < tr.EMA50_4h_14d && tr.EMA20_4h < tr.EMA50_4h {
-		short += 10 // тренд ускоряется вниз
+		short += 10
 	}
-
-	// 5. Глобальный диапазон — позиция у верха/низа
 	if l.Range14dPositionPct > 90 {
-		short += 10 // цена у верха глобального диапазона
+		short += 10
 		sg += 15
 	}
 	if l.Range14dPositionPct < 10 {
-		long += 10 // цена у низа глобального диапазона
+		long += 10
 		lg += 15
 	}
-
-	// 6. Сжатие/расширение волатильности
 	if ind.ATR4h14d < ind.ATR4h*0.7 && ind.ATR4h14d > 0 {
-		// волатильность сжимается — готовимся к пробою (grid-стратегии)
 		lg += 10
 		sg += 10
 	}
 	if ind.ATR4h14d > ind.ATR4h*1.5 {
-		// волатильность расширяется — тренд набирает силу
 		if mom.Change14dPct > 0 {
 			long += 10
 		} else {
 			short += 10
 		}
 	}
-
-	// 7. Пробой глобального хая с объёмом
 	if m.Price > l.Range14dHigh && ind.VolumeRatio14d > 1.2 {
-		long += 10 // мощный пробой с объёмом
+		long += 10
 	}
 	if m.Price < l.Range14dLow && ind.VolumeRatio14d > 1.2 {
-		short += 10 // мощный пробой вниз с объёмом
+		short += 10
 	}
-
-	// 8. Расстояние до глобальных EMA
 	if tr.PriceVsEMA20_4h_14dPct > 30 {
-		short += 5 // слишком далеко от EMA20 — перегрет
+		short += 5
 	}
 	if tr.PriceVsEMA20_4h_14dPct < -20 {
-		long += 5 // слишком далеко вниз от EMA20
+		long += 5
 	}
-
-	// 9. 14-дневный RSI дивергенция (цена растёт, RSI падает)
-	// Это сложно сделать без исторических данных, но мы можем хотя бы сравнить
-	// RSI4h14d и RSI4h: если RSI4h14d ниже RSI4h, а цена выше, чем 14 дней назад — дивергенция
 	if mom.Change14dPct > 10 && ind.RSI4h14d < ind.RSI4h {
-		short += 10 // потенциальная медвежья дивергенция
+		short += 10
 	}
 	if mom.Change14dPct < -10 && ind.RSI4h14d > ind.RSI4h {
-		long += 10 // потенциальная бычья дивергенция
+		long += 10
 	}
 
 	return Strategies{
