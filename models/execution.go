@@ -22,6 +22,7 @@ type PositionState struct {
 	EntryPrice   float64   `json:"entry_price"`
 	Size         float64   `json:"size"`
 	StopLoss     float64   `json:"stop_loss"`
+	TakeProfit   float64   `json:"take_profit"`
 	HighestPrice float64   `json:"highest_price"`
 	LowestPrice  float64   `json:"lowest_price"`
 	OpenedAt     time.Time `json:"opened_at"`

@@ -9,6 +9,65 @@ import (
 	"universal-bybit-screener/models"
 )
 
+// CalculateDynamicStopLoss гарантирует отступ не менее k * ATR(1h) для защиты от шума
+func CalculateDynamicStopLoss(side string, entryPrice, pivotLevel, atr1h float64, atrMultiplier float64, tickStep float64) float64 {
+	if entryPrice <= 0 || atr1h <= 0 {
+		return 0
+	}
+
+	if atrMultiplier < 1.2 {
+		atrMultiplier = 1.5 // Оптимальный коэффициент фильтрации шума
+	}
+
+	minDistance := atr1h * atrMultiplier
+	rawSL := 0.0
+
+	if strings.EqualFold(side, "Buy") {
+		pivotDistance := entryPrice - pivotLevel
+		actualDistance := math.Max(pivotDistance, minDistance)
+		rawSL = entryPrice - actualDistance
+	} else if strings.EqualFold(side, "Sell") {
+		pivotDistance := pivotLevel - entryPrice
+		actualDistance := math.Max(pivotDistance, minDistance)
+		rawSL = entryPrice + actualDistance
+	} else {
+		return 0
+	}
+
+	if tickStep > 0 {
+		return RoundToStep(rawSL, tickStep)
+	}
+	return rawSL
+}
+
+// CalculateDynamicTakeProfit рассчитывает Take-Profit с привязкой к Risk/Reward
+func CalculateDynamicTakeProfit(side string, entryPrice, slPrice, minRR float64, tickStep float64) float64 {
+	if entryPrice <= 0 || slPrice <= 0 {
+		return 0
+	}
+
+	if minRR < 1.2 {
+		minRR = 1.5
+	}
+
+	slDistance := math.Abs(entryPrice - slPrice)
+	tpDistance := slDistance * minRR
+	rawTP := 0.0
+
+	if strings.EqualFold(side, "Buy") {
+		rawTP = entryPrice + tpDistance
+	} else if strings.EqualFold(side, "Sell") {
+		rawTP = entryPrice - tpDistance
+	} else {
+		return 0
+	}
+
+	if tickStep > 0 {
+		return RoundToStep(rawTP, tickStep)
+	}
+	return rawTP
+}
+
 func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeverage int) int {
 	if maxLeverage <= 1 {
 		return 1
@@ -98,7 +157,8 @@ func FormatStep(val, step float64) string {
 	return strconv.FormatFloat(RoundToStep(val, step), 'f', precision, 64)
 }
 
-func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct float64) bool {
+// ValidateStopLoss проверяет отступ SL относительно ATR % волатильности
+func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct, atr1hPct float64) bool {
 	if slPrice <= 0 || entryPrice <= 0 {
 		return false
 	}
@@ -118,7 +178,10 @@ func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct float64) bool
 		return false
 	}
 
-	return distPct >= 1.2 && distPct <= maxRiskPct
+	// Отступ SL обязан перекрывать рыночный шум 1h ATR минимум на 1.2x
+	minRequiredDist := math.Max(1.2, atr1hPct*1.2)
+
+	return distPct >= minRequiredDist && distPct <= maxRiskPct
 }
 
 func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) bool {
@@ -133,7 +196,6 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) 
 		}
 		distPct = (tpPrice - entryPrice) / entryPrice * 100.0
 	} else if strings.EqualFold(side, "Sell") {
-		// ИСПРАВЛЕНО: Тейк-профит для короткой позиции должен быть строго ниже цены входа
 		if tpPrice >= entryPrice {
 			return false
 		}
@@ -142,6 +204,6 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) 
 		return false
 	}
 
-	effectiveMinProfit := math.Max(minProfitPct, 1.8)
+	effectiveMinProfit := math.Max(minProfitPct, 1.5)
 	return distPct >= effectiveMinProfit && distPct <= 20.0
 }

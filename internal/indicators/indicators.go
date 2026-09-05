@@ -6,9 +6,10 @@ import (
 	"universal-bybit-screener/models"
 )
 
+// RSI рассчитывает Relative Strength Index по методу Уайдлера (Wilder's Smoothing)
 func RSI(candles []models.Candle, period int) float64 {
 	if len(candles) <= period || period <= 0 {
-		return 0
+		return 50.0
 	}
 
 	var gainSum, lossSum float64
@@ -38,16 +39,20 @@ func RSI(candles []models.Candle, period int) float64 {
 	}
 
 	if avgLoss == 0 {
-		return 100
+		if avgGain == 0 {
+			return 50.0 // Полный флэт
+		}
+		return 100.0
 	}
 
 	rs := avgGain / avgLoss
-	return 100 - (100 / (1 + rs))
+	return 100.0 - (100.0 / (1.0 + rs))
 }
 
+// ATR рассчитывает Average True Range с использованием Wilder's Smoothing
 func ATR(candles []models.Candle, period int) float64 {
 	if len(candles) <= period || period <= 0 {
-		return 0
+		return 0.0
 	}
 
 	var trSum float64
@@ -72,31 +77,36 @@ func trueRange(c models.Candle, prevClose float64) float64 {
 	return math.Max(highLow, math.Max(highPrevClose, lowPrevClose))
 }
 
-// VolumeRatio оценивает аномальный приток денег в USDT (Turnover)
+// VolumeRatio оценивает аномальный приток денег в USDT строго по ЗАКРЫТЫМ свечам
 func VolumeRatio(candles []models.Candle, period int) float64 {
 	n := len(candles)
-	if n < period+1 || period <= 0 {
-		return 0
+	// Требуется как минимум period + 2 свечи, чтобы отбросить текущую незакрытую [n-1]
+	if n < period+2 || period <= 0 {
+		return 1.0
 	}
 
+	// Исключаем последнюю свечу [n-1], так как она еще формируется
+	completed := candles[:n-1]
+	lastCompleted := completed[len(completed)-1]
+
 	var sum float64
-	start := n - period - 1
-	for i := start; i < n-1; i++ {
-		sum += candles[i].Turnover
+	start := len(completed) - period
+	for i := start; i < len(completed)-1; i++ {
+		sum += completed[i].Turnover
 	}
 
 	avg := sum / float64(period)
 	if avg == 0 {
-		return 0
+		return 1.0
 	}
 
-	return candles[n-1].Turnover / avg
+	return lastCompleted.Turnover / avg
 }
 
 func VolumeTrend(candles []models.Candle, shortPeriod, longPeriod int) float64 {
 	n := len(candles)
 	if shortPeriod <= 0 || longPeriod <= 0 || n < shortPeriod+longPeriod {
-		return 0
+		return 0.0
 	}
 
 	shortStart := n - shortPeriod
@@ -114,8 +124,8 @@ func VolumeTrend(candles []models.Candle, shortPeriod, longPeriod int) float64 {
 	longAvg := longSum / float64(longPeriod)
 
 	if longAvg == 0 {
-		return 0
+		return 0.0
 	}
 
-	return shortAvg / longAvg
+	return (shortAvg/longAvg - 1.0) * 100.0
 }

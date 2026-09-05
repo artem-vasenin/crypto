@@ -14,3 +14,4 @@ logs
 bot.tmp
 screener.tmp
 .DS_Store
+analyzer

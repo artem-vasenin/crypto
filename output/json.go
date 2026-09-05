@@ -17,22 +17,19 @@ var (
 	fileHashes = make(map[string]string)
 )
 
-// WriteJSON атомарно записывает структуру результатов скрининга на диск через временный файл .tmp
 func WriteJSON(path string, v models.ScreeningResult) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("ошибка сериализации JSON: %w", err)
+		return fmt.Errorf("json marshal error: %w", err)
 	}
 
 	return atomicWrite(path, data)
 }
 
-// WriteJSONIfChanged вычисляет MD5-хэш payload и перезаписывает файл ТОЛЬКО при обнаружении изменений.
-// Возвращает true, если файл был перезаписан на диске, и false, если данные не изменились.
 func WriteJSONIfChanged(path string, v models.ScreeningResult) (bool, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return false, fmt.Errorf("ошибка сериализации JSON: %w", err)
+		return false, fmt.Errorf("json marshal error: %w", err)
 	}
 
 	hasher := md5.New()
@@ -55,22 +52,21 @@ func WriteJSONIfChanged(path string, v models.ScreeningResult) (bool, error) {
 	return true, nil
 }
 
-// atomicWrite выполняет транзакционную замену файла на уровне файловой системы
 func atomicWrite(path string, data []byte) error {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("ошибка создания директории %s: %w", dir, err)
+			return fmt.Errorf("create directory %s error: %w", dir, err)
 		}
 	}
 
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return fmt.Errorf("ошибка записи во временный файл %s: %w", tmp, err)
+		return fmt.Errorf("write temp file %s error: %w", tmp, err)
 	}
 
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("ошибка атомарной замены файла %s -> %s: %w", tmp, path, err)
+		return fmt.Errorf("atomic rename %s -> %s error: %w", tmp, path, err)
 	}
 
 	return nil

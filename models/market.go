@@ -3,7 +3,6 @@ package models
 
 import "time"
 
-// Instrument описывает USDT Linear Perpetual контракт на Bybit
 type Instrument struct {
 	Symbol          string    `json:"symbol"`
 	BaseCoin        string    `json:"base_coin"`
@@ -19,7 +18,6 @@ type Instrument struct {
 	FundingInterval int       `json:"funding_interval_min"`
 }
 
-// Ticker содержит текущий 24h снимок цены и объема
 type Ticker struct {
 	Symbol            string  `json:"symbol"`
 	LastPrice         float64 `json:"last_price"`
@@ -37,7 +35,6 @@ type Ticker struct {
 	OpenInterestValue float64 `json:"open_interest_value"`
 }
 
-// Candle представляет OHLCV свечу
 type Candle struct {
 	Time     time.Time `json:"time"`
 	Open     float64   `json:"open"`
@@ -48,19 +45,16 @@ type Candle struct {
 	Turnover float64   `json:"turnover"`
 }
 
-// OpenInterestPoint — элемент исторического снимка OI
 type OpenInterestPoint struct {
 	Time         time.Time `json:"time"`
 	OpenInterest float64   `json:"open_interest"`
 }
 
-// FundingPoint — элемент истории фандинга
 type FundingPoint struct {
 	Time time.Time `json:"time"`
 	Rate float64   `json:"rate"`
 }
 
-// Indicators хранит вычисленные технические индикаторы
 type Indicators struct {
 	RSI15m        float64 `json:"rsi_15m"`
 	RSI1h         float64 `json:"rsi_1h"`
@@ -74,25 +68,22 @@ type Indicators struct {
 	VolumeTrend1h float64 `json:"volume_trend_1h"`
 }
 
-// Pivot определяет экстремум структуры
 type Pivot struct {
 	Time  time.Time `json:"time"`
 	Price float64   `json:"price"`
 }
 
-// Structure содержит структуру экстремумов таймфрейма
 type Structure struct {
 	Highs        []Pivot `json:"pivot_highs"`
 	Lows         []Pivot `json:"pivot_lows"`
-	HighState    string  `json:"high_state"` // HH, LH, EQ
-	LowState     string  `json:"low_state"`  // HL, LL, EQ
+	HighState    string  `json:"high_state"`
+	LowState     string  `json:"low_state"`
 	PreviousHigh float64 `json:"previous_high"`
 	CurrentHigh  float64 `json:"current_high"`
 	PreviousLow  float64 `json:"previous_low"`
 	CurrentLow   float64 `json:"current_low"`
 }
 
-// Levels хранит ценовые уровни и геометрические параметры диапазона
 type Levels struct {
 	Resistance        []float64 `json:"resistance"`
 	Support           []float64 `json:"support"`
@@ -103,7 +94,6 @@ type Levels struct {
 	RangeToATR1h      float64   `json:"range_to_atr_1h"`
 }
 
-// Derivatives содержит деривативные свойства
 type Derivatives struct {
 	FundingRate        float64 `json:"funding_rate"`
 	FundingAvg         float64 `json:"funding_avg"`
@@ -113,7 +103,6 @@ type Derivatives struct {
 	SpreadPct          float64 `json:"spread_pct"`
 }
 
-// OrderBookMetrics содержит расчет мгновенного баланса стакана L2
 type OrderBookMetrics struct {
 	BidNotional  float64 `json:"bid_notional"`
 	AskNotional  float64 `json:"ask_notional"`
@@ -122,14 +111,12 @@ type OrderBookMetrics struct {
 	Levels       int     `json:"levels"`
 }
 
-// StrategyResult хранит итоговую оценку алгоритма
 type StrategyResult struct {
 	Score  float64 `json:"score"`
-	Status string  `json:"status"` // consider, watch, risky, avoid, reject
+	Status string  `json:"status"`
 	Reason string  `json:"reason"`
 }
 
-// Candidate — агрегированный вектор данных монеты
 type Candidate struct {
 	Symbol string `json:"symbol"`
 	Market struct {
@@ -149,7 +136,6 @@ type Candidate struct {
 	Strategies  map[string]StrategyResult `json:"strategies"`
 }
 
-// ScreeningResult — итоговый контракт данных на диск
 type ScreeningResult struct {
 	GeneratedAt time.Time   `json:"generated_at"`
 	Strategy    string      `json:"primary_strategy"`

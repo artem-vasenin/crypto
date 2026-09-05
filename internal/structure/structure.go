@@ -6,7 +6,6 @@ import (
 	"universal-bybit-screener/models"
 )
 
-// Analyze ищет Pivot High / Low и определяет трендовое состояние двух последних пивотов
 func Analyze(candles []models.Candle, leftRight, maxPivots int) models.Structure {
 	var highs, lows []models.Pivot
 	n := len(candles)
@@ -84,7 +83,6 @@ func fetchLowState(prev, curr float64) string {
 	return "EQ"
 }
 
-// Levels сортирует сопротивления снизу вверх, а поддержки сверху вниз (ближайшие уровни в индексах 0)
 func Levels(s models.Structure, currentPrice float64) models.Levels {
 	lvl := models.Levels{}
 
@@ -99,12 +97,10 @@ func Levels(s models.Structure, currentPrice float64) models.Levels {
 		}
 	}
 
-	// Resistance: ближайшие снизу вверх (0 = ближайшее сопротивление)
 	sort.Slice(lvl.Resistance, func(i, j int) bool {
 		return lvl.Resistance[i] < lvl.Resistance[j]
 	})
 
-	// Support: ближайшие сверху вниз (0 = ближайшая поддержка)
 	sort.Slice(lvl.Support, func(i, j int) bool {
 		return lvl.Support[i] > lvl.Support[j]
 	})
@@ -125,7 +121,6 @@ func Levels(s models.Structure, currentPrice float64) models.Levels {
 	return lvl
 }
 
-// ApplyATR вычисляет ширину канала в единицах ATR_1h
 func ApplyATR(lvl models.Levels, atr1h, currentPrice float64) models.Levels {
 	if atr1h > 0 && currentPrice > 0 && lvl.NearestResistance > lvl.NearestSupport {
 		lvl.RangeToATR1h = (lvl.NearestResistance - lvl.NearestSupport) / atr1h

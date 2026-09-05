@@ -73,7 +73,6 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		e.handleExecutionWS,
 	)
 
-	// Запуск фоновой очистки дамп-файлов старше 14 дней
 	go e.startSnapshotCleanupWorker()
 
 	return e
@@ -83,7 +82,6 @@ func (e *Engine) startSnapshotCleanupWorker() {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
-	// Запуск чистки при старте приложения
 	e.CleanupOldSnapshots(14 * 24 * time.Hour)
 
 	for range ticker.C {
@@ -282,7 +280,7 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 	defer e.mu.Unlock()
 
 	now := time.Now().UTC()
-	staleThreshold := 60 * time.Minute
+	staleThreshold := 50 * time.Minute
 
 	for symbol, pos := range e.positions {
 		if pos.Side == "PENDING" || pos.Side != e.targetSide {
@@ -306,16 +304,15 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			// Вместо маркет-ликвидации сдвигаем SL в безубыток, если позиция в микропрофите (>0.12%)
-			if pnlPct >= 0.12 {
+			// Увеличиваем буфер безубытка до 0.14% для 100% покрытия комиссий входа/выхода
+			feeBufferPct := 0.0014
+			if pnlPct >= 0.14 {
 				_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
 				if err != nil {
 					tickSize = 0.0001
 				}
 
-				feeBufferPct := 0.0012
 				newSL := 0.0
-
 				if pos.Side == "Buy" {
 					newSL = RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
 					if newSL > pos.StopLoss {
@@ -350,7 +347,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	// HARD GATE 1: Межрыночный фильтр корреляции с Биткоином (BTC Beta Filter)
+	// HARD GATE 1: Межрыночный фильтр корреляции с BTC
 	if btcChangePct, ok := e.wsEngine.GetBTCTrend15m(); ok {
 		if side == "Buy" && btcChangePct < -0.35 {
 			return fmt.Errorf("rejected %s Long: BTC dumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
@@ -360,14 +357,14 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	}
 
-	// HARD GATE 2: Запрет Long при подтвержденном часовом даунтренде (LH + LL)
+	// HARD GATE 2: Блокировка против часового тренда
 	if struct1h, ok := c.Structure["1h"]; ok {
 		if side == "Buy" && struct1h.HighState == "LH" && struct1h.LowState == "LL" {
 			return fmt.Errorf("rejected %s Long: 1h confirmed downtrend (LH+LL)", c.Symbol)
 		}
 	}
 
-	// HARD GATE 3: Запрет входа в середине диапазона (Chop Zone)
+	// HARD GATE 3: Блокировка входа в середине диапазона (Chop Zone)
 	if c.Levels.RangePositionPct > 35.0 && c.Levels.RangePositionPct < 65.0 {
 		return fmt.Errorf("rejected %s %s: entry inside middle range position (%.1f%%)", c.Symbol, side, c.Levels.RangePositionPct)
 	}
@@ -445,8 +442,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	} else {
 		spreadPct := (askPrice - bidPrice) / askPrice * 100.0
-		if spreadPct > 0.10 {
-			return fmt.Errorf("rejected %s: spread %.3f%% exceeds max 0.10%% limit", c.Symbol, spreadPct)
+		if spreadPct > 0.08 {
+			return fmt.Errorf("rejected %s: spread %.3f%% exceeds max 0.08%% limit", c.Symbol, spreadPct)
 		}
 		if side == "Buy" {
 			currentPrice = askPrice
@@ -474,38 +471,23 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
 	}
 
-	slPct := 0.018
-	slDist := currentPrice * slPct
-	slPrice := 0.0
-
-	if side == "Buy" {
-		slPrice = currentPrice - slDist
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice {
-			supDistPct := (currentPrice - c.Levels.NearestSupport) / currentPrice
-			if supDistPct >= 0.012 && supDistPct <= 0.023 {
-				slPrice = c.Levels.NearestSupport
-			}
-		}
-	} else {
-		slPrice = currentPrice + slDist
-		if c.Levels.NearestResistance > currentPrice {
-			resDistPct := (c.Levels.NearestResistance - currentPrice) / currentPrice
-			if resDistPct >= 0.012 && resDistPct <= 0.023 {
-				slPrice = c.Levels.NearestResistance
-			}
-		}
+	// Расчет динамического Stop-Loss с обязательным отступом от 1h ATR волатильности
+	pivotLevel := c.Levels.NearestSupport
+	if side == "Sell" {
+		pivotLevel = c.Levels.NearestResistance
 	}
-	slPrice = RoundToStep(slPrice, tickSize)
+	slPrice := CalculateDynamicStopLoss(side, currentPrice, pivotLevel, c.Indicators.ATR1h, 1.5, tickSize)
 
-	if !ValidateStopLoss(side, currentPrice, slPrice, 2.5) {
-		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f)", c.Symbol, currentPrice, slPrice)
+	if !ValidateStopLoss(side, currentPrice, slPrice, 3.5, c.Indicators.ATR1hPct) {
+		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f, atr1hPct: %.2f%%)",
+			c.Symbol, currentPrice, slPrice, c.Indicators.ATR1hPct)
 	}
 
 	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
 	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, currentPrice, qtyStep, minQty, minNotional)
 
 	if qty <= 0 {
-		return fmt.Errorf("calculated qty (0) is invalid for %s (minQty: %f, minNotional: %f)", c.Symbol, minQty, minNotional)
+		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
 	}
 
 	e.mu.Lock()
@@ -523,29 +505,10 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	}
 
-	actualRiskDist := math.Abs(currentPrice - slPrice)
-	minTPDist := currentPrice * 0.025
-	tpDist := math.Max(actualRiskDist*1.8, minTPDist)
-	tpPrice := 0.0
+	// Расчет динамического Take-Profit с привязкой к полученному риску (R:R >= 1.5)
+	tpPrice := CalculateDynamicTakeProfit(side, currentPrice, slPrice, 1.5, tickSize)
 
-	if side == "Buy" {
-		tpPrice = currentPrice + tpDist
-		if c.Levels.NearestResistance > currentPrice && c.Levels.NearestResistance < tpPrice {
-			if (c.Levels.NearestResistance - currentPrice) >= minTPDist {
-				tpPrice = c.Levels.NearestResistance
-			}
-		}
-	} else {
-		tpPrice = currentPrice - tpDist
-		if c.Levels.NearestSupport > 0 && c.Levels.NearestSupport < currentPrice && c.Levels.NearestSupport > tpPrice {
-			if (currentPrice - c.Levels.NearestSupport) >= minTPDist {
-				tpPrice = c.Levels.NearestSupport
-			}
-		}
-	}
-	tpPrice = RoundToStep(tpPrice, tickSize)
-
-	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.2) {
+	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.5) {
 		return fmt.Errorf("take profit validation failed for %s (entry: %.4f, tp: %.4f)", c.Symbol, currentPrice, tpPrice)
 	}
 
@@ -559,7 +522,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	log.Printf("[SUCCESS] Position opened: %s %s | Leverage: x%d | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
 		c.Symbol, side, targetLeverage, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
 
-	// СОХРАНЕНИЕ ТОЧНОГО DUMP-СНИМКА МЕТРИК В МОМЕНТ ВХОДА
 	go func(candidate models.Candidate, ordID string, p float64, q float64, lev int) {
 		if err := SaveTradeSnapshot(candidate.Symbol, side, p, q, lev, ordID, candidate); err != nil {
 			log.Printf("[WARN] Failed to save trade snapshot for %s: %v", candidate.Symbol, err)
@@ -573,6 +535,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		EntryPrice:   currentPrice,
 		Size:         qty,
 		StopLoss:     slPrice,
+		TakeProfit:   tpPrice,
 		HighestPrice: currentPrice,
 		LowestPrice:  currentPrice,
 		OpenedAt:     time.Now().UTC(),
@@ -613,7 +576,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	feeBufferPct := 0.0012
+	feeBufferPct := 0.0014
 	updatedSL := 0.0
 	shouldUpdate := false
 
@@ -988,8 +951,8 @@ func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty,
 			execPrice = bid
 		}
 		priceDevPct := math.Abs(execPrice-last) / last * 100.0
-		if priceDevPct > 0.10 {
-			return "", fmt.Errorf("rejected market order for %s: execution price deviation %.3f%% exceeds max 0.10%% limit", symbol, priceDevPct)
+		if priceDevPct > 0.08 {
+			return "", fmt.Errorf("rejected market order for %s: execution price deviation %.3f%% exceeds max 0.08%% limit", symbol, priceDevPct)
 		}
 	}
 
