@@ -306,30 +306,33 @@ func (e *Engine) CheckStalePositions(ctx context.Context) {
 				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
 			}
 
-			if pnlPct < 0.8 {
-				log.Printf("[TIME-STOP FORCE] Liquidating stale position %s %s (Hold Time: %s, PnL: %.2f%%)",
-					symbol, pos.Side, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
+			// Вместо маркет-ликвидации сдвигаем SL в безубыток, если позиция в микропрофите (>0.12%)
+			if pnlPct >= 0.12 {
+				_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
+				if err != nil {
+					tickSize = 0.0001
+				}
 
-				go func(sym, side string, qty float64) {
-					closeSide := "Sell"
-					if side == "Sell" {
-						closeSide = "Buy"
-					}
+				feeBufferPct := 0.0012
+				newSL := 0.0
 
-					params := map[string]interface{}{
-						"category":    "linear",
-						"symbol":      sym,
-						"side":        closeSide,
-						"orderType":   "Market",
-						"qty":         strconv.FormatFloat(qty, 'f', -1, 64),
-						"reduceOnly":  true,
-						"timeInForce": "GTC",
+				if pos.Side == "Buy" {
+					newSL = RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
+					if newSL > pos.StopLoss {
+						log.Printf("[TIME-BE] Moving %s Long SL to Breakeven+Fee: %.4f (Hold Time: %s, PnL: %.2f%%)",
+							symbol, newSL, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
+						go e.setTradingStop(ctx, symbol, pos.Side, newSL, tickSize)
+						pos.StopLoss = newSL
 					}
-					_, err := e.doSignedPOST(ctx, "/v5/order/create", params, sym)
-					if err != nil {
-						log.Printf("[ERROR] Time-Stop execution failed for %s: %v", sym, err)
+				} else if pos.Side == "Sell" {
+					newSL = RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
+					if pos.StopLoss == 0 || newSL < pos.StopLoss {
+						log.Printf("[TIME-BE] Moving %s Short SL to Breakeven+Fee: %.4f (Hold Time: %s, PnL: %.2f%%)",
+							symbol, newSL, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
+						go e.setTradingStop(ctx, symbol, pos.Side, newSL, tickSize)
+						pos.StopLoss = newSL
 					}
-				}(symbol, pos.Side, pos.Size)
+				}
 			}
 		}
 	}
@@ -449,6 +452,20 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 			currentPrice = askPrice
 		} else {
 			currentPrice = bidPrice
+		}
+	}
+
+	// HARD GATE 4: Проверка потенциала R:R (минимальный ход до сопротивления/поддержки +2.7%)
+	minProfitDistPct := 0.027
+	if side == "Buy" {
+		if c.Levels.NearestResistance > 0 && (c.Levels.NearestResistance-currentPrice)/currentPrice < minProfitDistPct {
+			return fmt.Errorf("rejected %s Long: resistance too close (%.2f%% < min required %.2f%%)",
+				c.Symbol, (c.Levels.NearestResistance-currentPrice)/currentPrice*100, minProfitDistPct*100)
+		}
+	} else {
+		if c.Levels.NearestSupport > 0 && (currentPrice-c.Levels.NearestSupport)/currentPrice < minProfitDistPct {
+			return fmt.Errorf("rejected %s Short: support too close (%.2f%% < min required %.2f%%)",
+				c.Symbol, (currentPrice-c.Levels.NearestSupport)/currentPrice*100, minProfitDistPct*100)
 		}
 	}
 
