@@ -4,3 +4,4 @@ configs/config.test.json
 .env.prod
 .env
 .env.test
+analyzer
