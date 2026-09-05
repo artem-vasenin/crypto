@@ -13,6 +13,8 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +72,62 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		e.handleBalanceUpdateWS,
 		e.handleExecutionWS,
 	)
+
+	// Запуск фоновой очистки дамп-файлов старше 14 дней
+	go e.startSnapshotCleanupWorker()
+
 	return e
+}
+
+func (e *Engine) startSnapshotCleanupWorker() {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	// Запуск чистки при старте приложения
+	e.CleanupOldSnapshots(14 * 24 * time.Hour)
+
+	for range ticker.C {
+		e.CleanupOldSnapshots(14 * 24 * time.Hour)
+	}
+}
+
+func (e *Engine) CleanupOldSnapshots(maxAge time.Duration) {
+	exePath, err := os.Executable()
+	baseDir := "."
+	if err == nil {
+		baseDir = filepath.Dir(exePath)
+	}
+
+	snapshotDir := filepath.Join(baseDir, "snapshots")
+	files, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	removedCount := 0
+
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		filePath := filepath.Join(snapshotDir, file.Name())
+		info, err := file.Info()
+		if err != nil {
+			continue
+		}
+
+		if now.Sub(info.ModTime().UTC()) > maxAge {
+			if err := os.Remove(filePath); err == nil {
+				removedCount++
+			}
+		}
+	}
+
+	if removedCount > 0 {
+		log.Printf("[CLEANUP SNAPSHOTS] Removed %d old trade snapshot files (older than 14d)", removedCount)
+	}
 }
 
 func (e *Engine) handleBalanceUpdateWS(balance float64) {
@@ -290,7 +347,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	// HARD GATE: Межрыночный фильтр корреляции с Биткоином (BTC Beta Filter)
+	// HARD GATE 1: Межрыночный фильтр корреляции с Биткоином (BTC Beta Filter)
 	if btcChangePct, ok := e.wsEngine.GetBTCTrend15m(); ok {
 		if side == "Buy" && btcChangePct < -0.35 {
 			return fmt.Errorf("rejected %s Long: BTC dumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
@@ -298,6 +355,18 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		if side == "Sell" && btcChangePct > 0.35 {
 			return fmt.Errorf("rejected %s Short: BTC pumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
 		}
+	}
+
+	// HARD GATE 2: Запрет Long при подтвержденном часовом даунтренде (LH + LL)
+	if struct1h, ok := c.Structure["1h"]; ok {
+		if side == "Buy" && struct1h.HighState == "LH" && struct1h.LowState == "LL" {
+			return fmt.Errorf("rejected %s Long: 1h confirmed downtrend (LH+LL)", c.Symbol)
+		}
+	}
+
+	// HARD GATE 3: Запрет входа в середине диапазона (Chop Zone)
+	if c.Levels.RangePositionPct > 35.0 && c.Levels.RangePositionPct < 65.0 {
+		return fmt.Errorf("rejected %s %s: entry inside middle range position (%.1f%%)", c.Symbol, side, c.Levels.RangePositionPct)
 	}
 
 	e.mu.Lock()
@@ -473,6 +542,13 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	log.Printf("[SUCCESS] Position opened: %s %s | Leverage: x%d | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
 		c.Symbol, side, targetLeverage, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
 
+	// СОХРАНЕНИЕ ТОЧНОГО DUMP-СНИМКА МЕТРИК В МОМЕНТ ВХОДА
+	go func(candidate models.Candidate, ordID string, p float64, q float64, lev int) {
+		if err := SaveTradeSnapshot(candidate.Symbol, side, p, q, lev, ordID, candidate); err != nil {
+			log.Printf("[WARN] Failed to save trade snapshot for %s: %v", candidate.Symbol, err)
+		}
+	}(c, orderID, currentPrice, qty, targetLeverage)
+
 	e.mu.Lock()
 	e.positions[c.Symbol] = &models.PositionState{
 		Symbol:       c.Symbol,
@@ -520,7 +596,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	feeBufferPct := 0.0012 // Резерв на покрытие Taker-комиссии (0.12%)
+	feeBufferPct := 0.0012
 	updatedSL := 0.0
 	shouldUpdate := false
 
@@ -574,7 +650,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 			maxSL := RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
 			if newSL > maxSL {
-				newSL = maxSL // ИСПРАВЛЕН БАГ: ограничение newSL сверху
+				newSL = maxSL
 			}
 		}
 
