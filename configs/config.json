@@ -19,10 +19,10 @@
   },
   "execution": {
     "testnet": false,
-    "max_leverage": 2,
+    "max_leverage": 3,
     "margin_per_trade_usd": 3.0,
     "max_total_margin_usd": 12.0,
-    "max_active_positions": 2,
+    "max_active_positions": 3,
     "min_score": 82.0,
     "trailing_pct": 1,
     "check_interval": "1m"
