@@ -57,7 +57,7 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 
 	score := 0.0
 
-	// 2. SCORING
+	// 2. SCORING (Максимальная сумма = 100)
 	if priceUp {
 		score += 20
 	}

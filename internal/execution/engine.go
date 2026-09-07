@@ -355,16 +355,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		}
 	}
 
-	if struct1h, ok := c.Structure["1h"]; ok {
-		if side == "Buy" && struct1h.HighState == "LH" && struct1h.LowState == "LL" {
-			return fmt.Errorf("rejected %s Long: 1h confirmed downtrend (LH+LL)", c.Symbol)
-		}
-	}
-
-	if c.Levels.RangePositionPct > 35.0 && c.Levels.RangePositionPct < 65.0 {
-		return fmt.Errorf("rejected %s %s: entry inside middle range position (%.1f%%)", c.Symbol, side, c.Levels.RangePositionPct)
-	}
-
 	e.mu.Lock()
 	if _, active := e.positions[c.Symbol]; active {
 		e.mu.Unlock()
@@ -618,7 +608,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, current
 
 		if maxProfitPct >= 1.8 {
 			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
-			dynamicSL := RoundToStep(pos.LowestPrice-trailingDist, tickSize)
+			dynamicSL := RoundToStep(pos.LowestPrice+trailingDist, tickSize)
 			if dynamicSL < newSL {
 				newSL = dynamicSL
 			}
