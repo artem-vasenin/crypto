@@ -14,8 +14,8 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 	st4 := c.Structure["4h"]
 
 	// 1. HARD GATES (Жесткие блокировки)
-	if st1.HighState == "HH" && st1.LowState == "HL" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h confirmed uptrend (HH+HL)"}
+	if st1.HighState == "HH" && st1.LowState == "HL" && st4.HighState == "HH" {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "confirmed macro uptrend (1h+4h HH)"}
 	}
 
 	if c.Indicators.ATR1hPct > 4.0 || c.Indicators.ATR15m == 0 {
@@ -27,52 +27,52 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "spread exceeds 0.08% threshold"}
 	}
 
-	// HARD GATE: Требуем реального доминирования продавцов в стакане L2 (минимум -5%)
-	if c.OrderBook.ImbalancePct > -5.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient ask dominance in orderbook (imbalance > -5%)"}
+	// HARD GATE: Доминирование Asks в L2 стакане (минимум -3.0%)
+	if c.OrderBook.ImbalancePct > -3.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient ask dominance in orderbook (imbalance > -3%)"}
 	}
 
-	// HARD GATE: Запрет входа при аномально отрицательном Funding Rate
-	if c.Derivatives.FundingRate < -0.0003 { // < -0.03% за 8ч
+	// HARD GATE: Запрет продаж при перегретом отрицательном фандинге (<-0.03%)
+	if c.Derivatives.FundingRate < -0.0003 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "overheated negative funding rate (<-0.03%)"}
 	}
 
-	// HARD GATE: Продажа разрешена строго у верхней границы (запрет продажи нижних фитилей)
-	if c.Levels.RangePositionPct < 72.0 && c.Levels.NearestSupport > 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside strict pullback zone (<72% range position)"}
+	// HARD GATE: Рабочий коридор отката — верхние 35% диапазона (>= 65%)
+	if c.Levels.RangePositionPct < 65.0 && c.Levels.NearestSupport > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside pullback zone (<65% range position)"}
 	}
 
-	// HARD GATE: Фильтр RSI (продажа строго в диапазоне 38-62)
-	if c.Indicators.RSI1h <= 38.0 || c.Indicators.RSI1h > 62.0 {
+	// HARD GATE: Фильтр RSI (продажа строго 35-62)
+	if c.Indicators.RSI1h <= 35.0 || c.Indicators.RSI1h > 62.0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h invalid for short pullback entry"}
 	}
 
 	priceDown := c.Market.Change24h < 0
-	oiUp := c.Derivatives.OpenInterestChange > 0
+	oiUp := c.Derivatives.OpenInterestChange > 0.25
 
-	if !oiUp || c.Derivatives.OpenInterestChange < 1.2 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient Open Interest influx (<1.2%)"}
+	if !oiUp {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient Open Interest influx (<0.25%)"}
 	}
 
 	score := 0.0
 
 	// 2. SCORING
 	if priceDown {
-		score += 30
-	}
-
-	if st1.HighState == "LH" || st1.LowState == "LL" {
-		score += 25
-	}
-	if st4.HighState == "LH" || st4.LowState == "LL" {
-		score += 15
-	}
-
-	if c.Levels.RangePositionPct >= 80.0 && c.Levels.RangePositionPct <= 95.0 {
 		score += 20
 	}
 
-	if c.OrderBook.ImbalancePct < -15.0 {
+	if st1.HighState == "LH" || st1.LowState == "LL" {
+		score += 30
+	}
+	if st4.HighState == "LH" || st4.LowState == "LL" {
+		score += 20
+	}
+
+	if c.Levels.RangePositionPct >= 75.0 && c.Levels.RangePositionPct <= 95.0 {
+		score += 20
+	}
+
+	if c.OrderBook.ImbalancePct < -10.0 {
 		score += 10
 	}
 

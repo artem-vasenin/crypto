@@ -112,10 +112,13 @@ func Levels(s models.Structure, currentPrice float64) models.Levels {
 		lvl.NearestSupport = lvl.Support[0]
 	}
 
+	// Защита от деления на ноль при отсутствии уровней сопротивления/поддержки
 	if lvl.NearestSupport > 0 && lvl.NearestResistance > lvl.NearestSupport {
 		width := lvl.NearestResistance - lvl.NearestSupport
-		lvl.RangeWidthPct = (width / lvl.NearestSupport) * 100
-		lvl.RangePositionPct = ((currentPrice - lvl.NearestSupport) / width) * 100
+		if width > 0 {
+			lvl.RangeWidthPct = (width / lvl.NearestSupport) * 100
+			lvl.RangePositionPct = ((currentPrice - lvl.NearestSupport) / width) * 100
+		}
 	}
 
 	return lvl

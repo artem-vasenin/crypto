@@ -52,7 +52,6 @@ func main() {
 
 	log.Printf("[INFO] Daemon active. Primary Strategy: %s | Execution Interval: %s", strategy.Name(), *interval)
 
-	// Первичный запуск
 	executeScreening(ctx, service, strategy.Name(), outFileName)
 
 	ticker := time.NewTicker(*interval)
