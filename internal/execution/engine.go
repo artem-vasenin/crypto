@@ -506,7 +506,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		c.Symbol, side, targetLeverage, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
 
 	go func(candidate models.Candidate, ordID string, p float64, q float64, lev int) {
-		if err := SaveTradeSnapshot(candidate.Symbol, side, p, q, lev, ordID, candidate); err != nil {
+		btcTrend, _ := e.wsEngine.GetBTCTrend15m()
+		if err := SaveTradeSnapshot(candidate.Symbol, side, p, q, lev, ordID, candidate, btcTrend); err != nil {
 			log.Printf("[WARN] Failed to save trade snapshot for %s: %v", candidate.Symbol, err)
 		}
 	}(c, orderID, currentPrice, qty, targetLeverage)
