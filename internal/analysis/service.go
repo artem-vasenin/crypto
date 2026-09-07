@@ -220,9 +220,11 @@ func (s *Service) analyzeWS(ctx context.Context, inst models.Instrument, t model
 	book := s.obCache.GetMetrics(inst.Symbol)
 
 	ind := models.Indicators{
+		RSI5m:         indicators.RSI(c5, 14),
 		RSI15m:        indicators.RSI(c15, 14),
 		RSI1h:         indicators.RSI(c60, 14),
 		RSI4h:         indicators.RSI(c240, 14),
+		ATR5m:         indicators.ATR(c5, 14),
 		ATR15m:        indicators.ATR(c15, 14),
 		ATR1h:         indicators.ATR(c60, 14),
 		ATR4h:         indicators.ATR(c240, 14),
@@ -230,6 +232,7 @@ func (s *Service) analyzeWS(ctx context.Context, inst models.Instrument, t model
 		VolumeTrend1h: indicators.VolumeTrend(c60, 5, 20),
 	}
 	if t.LastPrice > 0 {
+		ind.ATR5mPct = ind.ATR5m / t.LastPrice * 100
 		ind.ATR1hPct = ind.ATR1h / t.LastPrice * 100
 		ind.ATR4hPct = ind.ATR4h / t.LastPrice * 100
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"universal-bybit-screener/models"
@@ -36,8 +37,13 @@ func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, or
 		return fmt.Errorf("failed to create snapshot dir: %w", err)
 	}
 
+	stratKey := "long"
+	if strings.EqualFold(side, "Sell") || strings.EqualFold(side, "short") {
+		stratKey = "short"
+	}
+
 	execReason := ""
-	if st, ok := candidate.Strategies[side]; ok {
+	if st, ok := candidate.Strategies[stratKey]; ok {
 		execReason = st.Reason
 	}
 
