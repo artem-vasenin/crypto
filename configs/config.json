@@ -24,7 +24,7 @@
     "max_total_margin_usd": 12.0,
     "max_active_positions": 3,
     "min_score": 70.0,
-    "trailing_pct": 1,
+    "trailing_pct": 1.0,
     "check_interval": "1m"
   },
   "concurrency": 8,
