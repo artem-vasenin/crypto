@@ -85,10 +85,10 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 
 	s.mu.Lock()
 	if !s.isWarmedUp {
-		log.Printf("[WS WARMUP] Cold start: Fetching REST Klines warmup for %d tickers...", len(symbols))
+		log.Printf("[WS WARMUP] Cold start: Fetching REST Klines (5m, 15m, 30m, 1h, 4h) for %d tickers...", len(symbols))
 		s.warmupKlinesREST(ctx, symbols)
 
-		log.Printf("[WS START] Starting async Public WS Stream (OrderBooks + Klines)...")
+		log.Printf("[WS START] Starting async Public WS Stream...")
 		if err := s.wsStream.Start(ctx, symbols); err != nil {
 			s.mu.Unlock()
 			return models.ScreeningResult{}, fmt.Errorf("WS stream start failed: %w", err)
@@ -173,13 +173,19 @@ func (s *Service) warmupKlinesREST(ctx context.Context, symbols []string) {
 			}
 			defer func() { <-sem }()
 
-			if c15, err := s.client.Klines(ctx, sym, "15", s.cfg.Analysis.KlineLimit15m); err == nil {
+			if c5, err := s.client.Klines(ctx, sym, "5", 300); err == nil {
+				s.klineCache.Warmup(sym, "5", c5)
+			}
+			if c15, err := s.client.Klines(ctx, sym, "15", 300); err == nil {
 				s.klineCache.Warmup(sym, "15", c15)
 			}
-			if c60, err := s.client.Klines(ctx, sym, "60", s.cfg.Analysis.KlineLimit1h); err == nil {
+			if c30, err := s.client.Klines(ctx, sym, "30", 300); err == nil {
+				s.klineCache.Warmup(sym, "30", c30)
+			}
+			if c60, err := s.client.Klines(ctx, sym, "60", 300); err == nil {
 				s.klineCache.Warmup(sym, "60", c60)
 			}
-			if c240, err := s.client.Klines(ctx, sym, "240", s.cfg.Analysis.KlineLimit4h); err == nil {
+			if c240, err := s.client.Klines(ctx, sym, "240", 300); err == nil {
 				s.klineCache.Warmup(sym, "240", c240)
 			}
 		}()
@@ -188,11 +194,13 @@ func (s *Service) warmupKlinesREST(ctx context.Context, symbols []string) {
 }
 
 func (s *Service) analyzeWS(ctx context.Context, inst models.Instrument, t models.Ticker) (models.Candidate, error) {
+	c5 := s.klineCache.Get(inst.Symbol, "5")
 	c15 := s.klineCache.Get(inst.Symbol, "15")
+	c30 := s.klineCache.Get(inst.Symbol, "30")
 	c60 := s.klineCache.Get(inst.Symbol, "60")
 	c240 := s.klineCache.Get(inst.Symbol, "240")
 
-	if len(c15) < 20 || len(c60) < 20 || len(c240) < 20 {
+	if len(c5) < 20 || len(c15) < 20 || len(c60) < 20 || len(c240) < 20 {
 		return models.Candidate{}, fmt.Errorf("insufficient WS kline history for %s", inst.Symbol)
 	}
 
@@ -227,7 +235,9 @@ func (s *Service) analyzeWS(ctx context.Context, inst models.Instrument, t model
 	}
 
 	structures := map[string]models.Structure{
+		"5m":  structure.Analyze(c5, 2, 5),
 		"15m": structure.Analyze(c15, 2, 5),
+		"30m": structure.Analyze(c30, 2, 5),
 		"1h":  structure.Analyze(c60, 2, 5),
 		"4h":  structure.Analyze(c240, 2, 5),
 	}

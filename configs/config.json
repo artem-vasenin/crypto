@@ -10,7 +10,9 @@
     "max_grid_spread_pct": 0.08
   },
   "analysis": {
+    "kline_limit_5m": 300,
     "kline_limit_15m": 300,
+    "kline_limit_30m": 300,
     "kline_limit_1h": 300,
     "kline_limit_4h": 300,
     "open_interest_limit": 24,
