@@ -56,16 +56,21 @@ type FundingPoint struct {
 }
 
 type Indicators struct {
-	RSI15m        float64 `json:"rsi_15m"`
-	RSI1h         float64 `json:"rsi_1h"`
-	RSI4h         float64 `json:"rsi_4h"`
-	ATR15m        float64 `json:"atr_15m"`
-	ATR1h         float64 `json:"atr_1h"`
-	ATR4h         float64 `json:"atr_4h"`
-	ATR1hPct      float64 `json:"atr_1h_pct"`
-	ATR4hPct      float64 `json:"atr_4h_pct"`
-	VolumeRatio1h float64 `json:"volume_ratio_1h"`
-	VolumeTrend1h float64 `json:"volume_trend_1h"`
+	RSI5m            float64 `json:"rsi_5m"`
+	RSI15m           float64 `json:"rsi_15m"`
+	RSI1h            float64 `json:"rsi_1h"`
+	RSI4h            float64 `json:"rsi_4h"`
+	ATR5m            float64 `json:"atr_5m"`
+	ATR15m           float64 `json:"atr_15m"`
+	ATR1h            float64 `json:"atr_1h"`
+	ATR4h            float64 `json:"atr_4h"`
+	ATR5mPct         float64 `json:"atr_5m_pct"`
+	ATR1hPct         float64 `json:"atr_1h_pct"`
+	ATR4hPct         float64 `json:"atr_4h_pct"`
+	VolumeRatio1h    float64 `json:"volume_ratio_1h"`
+	VolumeTrend1h    float64 `json:"volume_trend_1h"`
+	PriceVsEMA10_15m float64 `json:"price_vs_ema10_15m_pct"`
+	BTC15mTrendPct   float64 `json:"btc_15m_trend_pct"`
 }
 
 type Pivot struct {

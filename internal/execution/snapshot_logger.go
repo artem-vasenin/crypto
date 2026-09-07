@@ -12,18 +12,19 @@ import (
 )
 
 type TradeSnapshot struct {
-	Timestamp  time.Time        `json:"timestamp"`
-	Symbol     string           `json:"symbol"`
-	Side       string           `json:"side"`
-	Price      float64          `json:"price"`
-	Qty        float64          `json:"qty"`
-	Leverage   int              `json:"leverage"`
-	OrderID    string           `json:"order_id"`
-	Candidate  models.Candidate `json:"candidate_metrics"`
-	BTCContext interface{}      `json:"btc_context,omitempty"`
+	Timestamp       time.Time        `json:"timestamp"`
+	Symbol          string           `json:"symbol"`
+	Side            string           `json:"side"`
+	Price           float64          `json:"price"`
+	Qty             float64          `json:"qty"`
+	Leverage        int              `json:"leverage"`
+	OrderID         string           `json:"order_id"`
+	ExecutionReason string           `json:"execution_reason"`
+	Candidate       models.Candidate `json:"candidate_metrics"`
+	BTC15mTrendPct  float64          `json:"btc_15m_trend_pct"`
 }
 
-func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, orderID string, candidate models.Candidate) error {
+func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, orderID string, candidate models.Candidate, btcTrendPct float64) error {
 	exePath, err := os.Executable()
 	baseDir := "."
 	if err == nil {
@@ -35,15 +36,22 @@ func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, or
 		return fmt.Errorf("failed to create snapshot dir: %w", err)
 	}
 
+	execReason := ""
+	if st, ok := candidate.Strategies[side]; ok {
+		execReason = st.Reason
+	}
+
 	snap := TradeSnapshot{
-		Timestamp: time.Now().UTC(),
-		Symbol:    symbol,
-		Side:      side,
-		Price:     price,
-		Qty:       qty,
-		Leverage:  leverage,
-		OrderID:   orderID,
-		Candidate: candidate,
+		Timestamp:       time.Now().UTC(),
+		Symbol:          symbol,
+		Side:            side,
+		Price:           price,
+		Qty:             qty,
+		Leverage:        leverage,
+		OrderID:         orderID,
+		ExecutionReason: execReason,
+		Candidate:       candidate,
+		BTC15mTrendPct:  btcTrendPct,
 	}
 
 	fileName := fmt.Sprintf("%s_%s_%s_%s.json",
