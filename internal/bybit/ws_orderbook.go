@@ -1,22 +1,19 @@
-// internal/bybit/ws_orderbook.go
 package bybit
 
 import (
+	"math"
+	"sort"
 	"strconv"
 	"sync"
 
 	"universal-bybit-screener/models"
 )
 
-const defaultWsURL = "wss://stream.bybit.com/v5/public/linear"
-
-// LocalOrderBook хранит L2-книгу ордеров конкретного тикера в ОЗУ
 type LocalOrderBook struct {
 	bids map[float64]float64
 	asks map[float64]float64
 }
 
-// OrderBookCache обеспечивает thread-safe доступ к стаканам всех отслеживаемых тикеров
 type OrderBookCache struct {
 	mu    sync.RWMutex
 	books map[string]*LocalOrderBook
@@ -28,7 +25,6 @@ func NewOrderBookCache() *OrderBookCache {
 	}
 }
 
-// Update применяет первичные Snapshot и инкрементальные Delta сообщения
 func (c *OrderBookCache) Update(symbol string, isSnapshot bool, rawBids, rawAsks [][]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -62,28 +58,48 @@ func (c *OrderBookCache) Update(symbol string, isSnapshot bool, rawBids, rawAsks
 	applySide(book.asks, rawAsks)
 }
 
-// GetMetrics за O(1) высчитывает объем Bid/Ask ликвидности и имбаланс стакана
+// GetMetrics высчитывает Imbalance СТРОГО по Top-10 уровням спреда (отсекая спуфинг)
 func (c *OrderBookCache) GetMetrics(symbol string) models.OrderBookMetrics {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	book, exists := c.books[symbol]
-	if !exists {
+	if !exists || len(book.bids) == 0 || len(book.asks) == 0 {
 		return models.OrderBookMetrics{}
 	}
 
-	var bidNotional, askNotional float64
-	for p, s := range book.bids {
-		bidNotional += p * s
+	type level struct {
+		price float64
+		size  float64
 	}
+
+	bids := make([]level, 0, len(book.bids))
+	for p, s := range book.bids {
+		bids = append(bids, level{price: p, size: s})
+	}
+	sort.Slice(bids, func(i, j int) bool { return bids[i].price > bids[j].price })
+
+	asks := make([]level, 0, len(book.asks))
 	for p, s := range book.asks {
-		askNotional += p * s
+		asks = append(asks, level{price: p, size: s})
+	}
+	sort.Slice(asks, func(i, j int) bool { return asks[i].price < asks[j].price })
+
+	var bidNotional, askNotional float64
+	depthBids := int(math.Min(10, float64(len(bids))))
+	depthAsks := int(math.Min(10, float64(len(asks))))
+
+	for i := 0; i < depthBids; i++ {
+		bidNotional += bids[i].price * bids[i].size
+	}
+	for i := 0; i < depthAsks; i++ {
+		askNotional += asks[i].price * asks[i].size
 	}
 
 	total := bidNotional + askNotional
 	imbalance := 0.0
 	if total > 0 {
-		imbalance = (bidNotional - askNotional) / total * 100
+		imbalance = (bidNotional - askNotional) / total * 100.0
 	}
 
 	ratio := 0.0
@@ -96,6 +112,6 @@ func (c *OrderBookCache) GetMetrics(symbol string) models.OrderBookMetrics {
 		AskNotional:  askNotional,
 		ImbalancePct: imbalance,
 		BidAskRatio:  ratio,
-		Levels:       len(book.bids) + len(book.asks),
+		Levels:       depthBids + depthAsks,
 	}
 }

@@ -1,4 +1,3 @@
-// internal/execution/engine.go
 package execution
 
 import (
@@ -11,10 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,7 +49,7 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 
 	e := &Engine{
 		cfg:              cfg,
-		client:           &http.Client{Timeout: 10 * time.Second},
+		client:           &http.Client{Timeout: 5 * time.Second},
 		baseURL:          baseURL,
 		positions:        make(map[string]*models.PositionState),
 		closedHistory:    make(map[string]*models.PositionState),
@@ -73,59 +69,17 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		e.handleExecutionWS,
 	)
 
-	go e.startSnapshotCleanupWorker()
-
 	return e
 }
 
-func (e *Engine) startSnapshotCleanupWorker() {
-	ticker := time.NewTicker(24 * time.Hour)
-	defer ticker.Stop()
-
-	e.CleanupOldSnapshots(14 * 24 * time.Hour)
-
-	for range ticker.C {
-		e.CleanupOldSnapshots(14 * 24 * time.Hour)
+func (e *Engine) InitWebSocket(ctx context.Context) error {
+	if err := e.wsEngine.StartPublicTickerStream(ctx); err != nil {
+		log.Printf("[WARN] Public WS failed: %v", err)
 	}
-}
-
-func (e *Engine) CleanupOldSnapshots(maxAge time.Duration) {
-	exePath, err := os.Executable()
-	baseDir := "."
-	if err == nil {
-		baseDir = filepath.Dir(exePath)
+	if err := e.wsEngine.StartPrivateStream(ctx); err != nil {
+		log.Printf("[WARN] Private WS failed: %v", err)
 	}
-
-	snapshotDir := filepath.Join(baseDir, "snapshots")
-	files, err := os.ReadDir(snapshotDir)
-	if err != nil {
-		return
-	}
-
-	now := time.Now().UTC()
-	removedCount := 0
-
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-			continue
-		}
-
-		filePath := filepath.Join(snapshotDir, file.Name())
-		info, err := file.Info()
-		if err != nil {
-			continue
-		}
-
-		if now.Sub(info.ModTime().UTC()) > maxAge {
-			if err := os.Remove(filePath); err == nil {
-				removedCount++
-			}
-		}
-	}
-
-	if removedCount > 0 {
-		log.Printf("[CLEANUP SNAPSHOTS] Removed %d old trade snapshot files (older than 14d)", removedCount)
-	}
+	return nil
 }
 
 func (e *Engine) handleBalanceUpdateWS(balance float64) {
@@ -133,7 +87,6 @@ func (e *Engine) handleBalanceUpdateWS(balance float64) {
 	defer e.mu.Unlock()
 	e.cachedBalance = balance
 	e.lastBalanceCheck = time.Now()
-	log.Printf("[WS BALANCE] Push update: Available USDT: %.2f USD", balance)
 }
 
 func (e *Engine) handleExecutionWS(exec ExecutionLog) {
@@ -141,44 +94,16 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	defer e.mu.Unlock()
 
 	pos, exists := e.positions[exec.Symbol]
-	if !exists {
+	if !exists || exec.ClosedSize <= 0 {
 		return
 	}
-
-	if exec.ClosedSize <= 0 {
-		return
-	}
-
-	entryPrice := pos.EntryPrice
-	var grossPnL float64
-	if pos.Side == "Buy" {
-		grossPnL = (exec.ExecPrice - entryPrice) * exec.ClosedSize
-	} else if pos.Side == "Sell" {
-		grossPnL = (entryPrice - exec.ExecPrice) * exec.ClosedSize
-	}
-
-	netPnL := grossPnL - exec.ExecFee
-
-	log.Printf("[TRADE CLOSED WS] %s %s | Closed Qty: %.4f | Entry: %.4f | Exit: %.4f | Fee: %.4f USDT | Net PnL: %.4f USDT | ExecType: %s",
-		exec.Symbol, pos.Side, exec.ClosedSize, entryPrice, exec.ExecPrice, exec.ExecFee, netPnL, exec.ExecType)
 
 	pos.Size -= exec.ClosedSize
-
 	if pos.Size <= 0.000001 {
 		e.closedHistory[exec.Symbol] = pos
 		delete(e.positions, exec.Symbol)
-		e.cooldowns[exec.Symbol] = time.Now().Add(30 * time.Minute)
+		e.cooldowns[exec.Symbol] = time.Now().Add(15 * time.Minute)
 	}
-}
-
-func (e *Engine) InitWebSocket(ctx context.Context) error {
-	if err := e.wsEngine.StartPublicTickerStream(ctx); err != nil {
-		log.Printf("[WARN] Failed to start public WS stream: %v", err)
-	}
-	if err := e.wsEngine.StartPrivateStream(ctx); err != nil {
-		log.Printf("[WARN] Failed to start private WS stream: %v", err)
-	}
-	return nil
 }
 
 func (e *Engine) handlePositionClosedWS(symbol string) {
@@ -186,10 +111,9 @@ func (e *Engine) handlePositionClosedWS(symbol string) {
 	defer e.mu.Unlock()
 
 	if pos, active := e.positions[symbol]; active {
-		log.Printf("[CLEANUP WS] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
 		e.closedHistory[symbol] = pos
 		delete(e.positions, symbol)
-		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
+		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
 	}
 }
 
@@ -197,141 +121,36 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	bal, err := e.fetchWalletBalance(ctx)
+	path := "/v5/account/wallet-balance"
+	queryString := "accountType=UNIFIED"
+
+	body, err := e.doSignedGET(ctx, path, queryString)
 	if err != nil {
 		return err
 	}
 
-	e.cachedBalance = bal
-	e.lastBalanceCheck = time.Now()
-	log.Printf("[BALANCE REST] Wallet USDT Available: %.2f USD", bal)
-	return nil
-}
-
-func (e *Engine) syncClosedPositionsREST(ctx context.Context) {
-	startTime := time.Now().Add(-10 * time.Minute).UnixMilli()
-	path := "/v5/position/closed-pnl"
-	queryString := fmt.Sprintf("category=linear&limit=10&startTime=%d", startTime)
-
-	body, err := e.doSignedGET(ctx, path, queryString)
-	if err != nil {
-		return
-	}
-
 	var res struct {
-		RetCode int `json:"retCode"`
-		Result  struct {
+		Result struct {
 			List []struct {
-				OrderId       string `json:"orderId"`
-				Symbol        string `json:"symbol"`
-				OrderSide     string `json:"orderSide"`
-				ClosedPnl     string `json:"closedPnl"`
-				AvgEntryPrice string `json:"avgEntryPrice"`
-				AvgExitPrice  string `json:"avgExitPrice"`
-				ClosedSize    string `json:"closedSize"`
-				ExecType      string `json:"execType"`
-				UpdatedTime   string `json:"updatedTime"`
+				Coin []struct {
+					Coin                string `json:"coin"`
+					AvailableToWithdraw string `json:"availableToWithdraw"`
+				} `json:"coin"`
 			} `json:"list"`
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(body, &res); err != nil || res.RetCode != 0 {
-		return
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	now := time.Now()
-	for id, t := range e.processedExecs {
-		if now.Sub(t) > 15*time.Minute {
-			delete(e.processedExecs, id)
-		}
-	}
-
-	for _, item := range res.Result.List {
-		dedupKey := item.Symbol + "_" + item.OrderId
-		if _, processed := e.processedExecs[dedupKey]; processed {
-			continue
-		}
-
-		pos, exists := e.positions[item.Symbol]
-		if !exists {
-			continue
-		}
-
-		pnl, _ := strconv.ParseFloat(item.ClosedPnl, 64)
-		entry, _ := strconv.ParseFloat(item.AvgEntryPrice, 64)
-		exit, _ := strconv.ParseFloat(item.AvgExitPrice, 64)
-		size, _ := strconv.ParseFloat(item.ClosedSize, 64)
-
-		log.Printf("[TRADE CLOSED REST RESTORE] %s | Qty: %.4f | Entry: %.4f | Exit: %.4f | Net PnL: %.4f USDT | ExecType: %s",
-			item.Symbol, size, entry, exit, pnl, item.ExecType)
-
-		e.processedExecs[dedupKey] = now
-		e.closedHistory[item.Symbol] = pos
-		delete(e.positions, item.Symbol)
-		e.cooldowns[item.Symbol] = time.Now().Add(30 * time.Minute)
-	}
-}
-
-func (e *Engine) CheckStalePositions(ctx context.Context) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	now := time.Now().UTC()
-	staleThreshold := 50 * time.Minute
-
-	for symbol, pos := range e.positions {
-		if pos.Side == "PENDING" || pos.Side != e.targetSide {
-			continue
-		}
-
-		if pos.OpenedAt.IsZero() {
-			pos.OpenedAt = now.Add(-30 * time.Minute)
-		}
-
-		if now.Sub(pos.OpenedAt) > staleThreshold {
-			currentPrice := pos.EntryPrice
-			if wsPrice, ok := e.wsEngine.GetLatestPrice(symbol); ok && wsPrice > 0 {
-				currentPrice = wsPrice
-			}
-
-			pnlPct := 0.0
-			if pos.Side == "Buy" {
-				pnlPct = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100.0
-			} else if pos.Side == "Sell" {
-				pnlPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100.0
-			}
-
-			feeBufferPct := 0.0014
-			if pnlPct >= 0.14 {
-				_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
-				if err != nil {
-					tickSize = 0.0001
-				}
-
-				newSL := 0.0
-				if pos.Side == "Buy" {
-					newSL = RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
-					if newSL > pos.StopLoss {
-						log.Printf("[TIME-BE] Moving %s Long SL to Breakeven+Fee: %.4f (Hold Time: %s, PnL: %.2f%%)",
-							symbol, newSL, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
-						go e.setTradingStop(ctx, symbol, pos.Side, newSL, tickSize)
-						pos.StopLoss = newSL
-					}
-				} else if pos.Side == "Sell" {
-					newSL = RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
-					if pos.StopLoss == 0 || newSL < pos.StopLoss {
-						log.Printf("[TIME-BE] Moving %s Short SL to Breakeven+Fee: %.4f (Hold Time: %s, PnL: %.2f%%)",
-							symbol, newSL, now.Sub(pos.OpenedAt).Round(time.Minute), pnlPct)
-						go e.setTradingStop(ctx, symbol, pos.Side, newSL, tickSize)
-						pos.StopLoss = newSL
-					}
-				}
+	if err := json.Unmarshal(body, &res); err == nil && len(res.Result.List) > 0 {
+		for _, coin := range res.Result.List[0].Coin {
+			if coin.Coin == "USDT" {
+				bal, _ := strconv.ParseFloat(coin.AvailableToWithdraw, 64)
+				e.cachedBalance = bal
+				e.lastBalanceCheck = time.Now()
+				return nil
 			}
 		}
 	}
+	return fmt.Errorf("failed to parse wallet balance")
 }
 
 func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
@@ -346,22 +165,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	if btcChangePct, ok := e.wsEngine.GetBTCTrend15m(); ok {
-		if side == "Buy" && btcChangePct < -0.35 {
-			return fmt.Errorf("rejected %s Long: BTC dumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
-		}
-		if side == "Sell" && btcChangePct > 0.35 {
-			return fmt.Errorf("rejected %s Short: BTC pumping (15m change: %.2f%%)", c.Symbol, btcChangePct)
-		}
-	}
-
 	e.mu.Lock()
-	if _, active := e.positions[c.Symbol]; active {
-		e.mu.Unlock()
-		return nil
-	}
-
-	if e.disabledTokens[c.Symbol] {
+	if _, active := e.positions[c.Symbol]; active || e.disabledTokens[c.Symbol] {
 		e.mu.Unlock()
 		return nil
 	}
@@ -386,13 +191,11 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	requiredMarginWithBuffer := e.cfg.MarginPerTradeUSD * 1.02
-	if e.cachedBalance < requiredMarginWithBuffer {
+	if e.cachedBalance < e.cfg.MarginPerTradeUSD {
 		e.mu.Unlock()
-		return fmt.Errorf("insufficient balance with fee buffer: required %.2f USDT, available %.2f USDT", requiredMarginWithBuffer, e.cachedBalance)
+		return fmt.Errorf("insufficient balance: available %.2f USD", e.cachedBalance)
 	}
 
-	e.cachedBalance -= e.cfg.MarginPerTradeUSD
 	e.positions[c.Symbol] = &models.PositionState{
 		Symbol:   c.Symbol,
 		Side:     "PENDING",
@@ -405,8 +208,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		if !orderPlaced {
 			e.mu.Lock()
 			delete(e.positions, c.Symbol)
-			e.cachedBalance += e.cfg.MarginPerTradeUSD
-			e.cooldowns[c.Symbol] = time.Now().Add(5 * time.Minute)
+			e.cooldowns[c.Symbol] = time.Now().Add(3 * time.Minute)
 			e.mu.Unlock()
 		}
 	}()
@@ -416,374 +218,97 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		return nil
 	}
 
-	currentPrice := 0.0
 	bidPrice, askPrice, _, err := e.getLiveTicker(ctx, c.Symbol)
 	if err != nil {
-		if wsPrice, ok := e.wsEngine.GetLatestPrice(c.Symbol); ok {
-			currentPrice = wsPrice
-			bidPrice = wsPrice
-			askPrice = wsPrice
-		} else {
-			return fmt.Errorf("failed to fetch live price for %s: %w", c.Symbol, err)
-		}
-	} else {
-		spreadPct := (askPrice - bidPrice) / askPrice * 100.0
-		if spreadPct > 0.08 {
-			return fmt.Errorf("rejected %s: spread %.3f%% exceeds max 0.08%% limit", c.Symbol, spreadPct)
-		}
-		if side == "Buy" {
-			currentPrice = askPrice
-		} else {
-			currentPrice = bidPrice
-		}
-	}
-
-	minProfitDistPct := 0.027
-	if side == "Buy" {
-		if c.Levels.NearestResistance > 0 && (c.Levels.NearestResistance-currentPrice)/currentPrice < minProfitDistPct {
-			return fmt.Errorf("rejected %s Long: resistance too close (%.2f%% < min required %.2f%%)",
-				c.Symbol, (c.Levels.NearestResistance-currentPrice)/currentPrice*100, minProfitDistPct*100)
-		}
-	} else {
-		if c.Levels.NearestSupport > 0 && (currentPrice-c.Levels.NearestSupport)/currentPrice < minProfitDistPct {
-			return fmt.Errorf("rejected %s Short: support too close (%.2f%% < min required %.2f%%)",
-				c.Symbol, (currentPrice-c.Levels.NearestSupport)/currentPrice*100, minProfitDistPct*100)
-		}
+		return fmt.Errorf("ticker error for %s: %w", c.Symbol, err)
 	}
 
 	qtyStep, minQty, tickSize, minNotional, err := e.getInstrumentLimits(ctx, c.Symbol)
 	if err != nil {
-		return fmt.Errorf("failed to fetch instrument specs for %s: %w", c.Symbol, err)
+		return fmt.Errorf("limits error for %s: %w", c.Symbol, err)
+	}
+
+	entryPrice := askPrice
+	if side == "Sell" {
+		entryPrice = bidPrice
 	}
 
 	pivotLevel := c.Levels.NearestSupport
 	if side == "Sell" {
 		pivotLevel = c.Levels.NearestResistance
 	}
-	slPrice := CalculateDynamicStopLoss(side, currentPrice, pivotLevel, c.Indicators.ATR1h, 1.5, tickSize)
 
-	if !ValidateStopLoss(side, currentPrice, slPrice, 3.5, c.Indicators.ATR1hPct) {
-		return fmt.Errorf("stop loss validation failed for %s (entry: %.4f, sl: %.4f, atr1hPct: %.2f%%)",
-			c.Symbol, currentPrice, slPrice, c.Indicators.ATR1hPct)
+	slPrice := CalculateDynamicStopLoss(side, entryPrice, pivotLevel, c.Indicators.ATR1h, 1.5, tickSize)
+	tpPrice := CalculateDynamicTakeProfit(side, entryPrice, slPrice, 2.0, tickSize)
+
+	if !ValidateStopLoss(side, entryPrice, slPrice, 4.0, c.Indicators.ATR1hPct) || !ValidateTakeProfit(side, entryPrice, tpPrice, 1.5) {
+		return fmt.Errorf("validation failed for %s SL: %.4f | TP: %.4f", c.Symbol, slPrice, tpPrice)
 	}
 
 	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
-	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, currentPrice, qtyStep, minQty, minNotional)
+	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, entryPrice, qtyStep, minQty, minNotional)
 
 	if qty <= 0 {
-		return fmt.Errorf("calculated qty (0) is invalid for %s", c.Symbol)
+		return fmt.Errorf("invalid qty for %s", c.Symbol)
 	}
 
-	e.mu.Lock()
-	cachedLev := e.leverageSetCache[c.Symbol]
-	e.mu.Unlock()
+	_ = e.setTradeModeIsolated(ctx, c.Symbol, targetLeverage)
+	_ = e.setLeverage(ctx, c.Symbol, targetLeverage)
 
-	if cachedLev != targetLeverage {
-		_ = e.setTradeModeIsolated(ctx, c.Symbol, targetLeverage)
-		if err := e.setLeverage(ctx, c.Symbol, targetLeverage); err != nil {
-			log.Printf("[WARN] Set leverage x%d for %s: %v", targetLeverage, c.Symbol, err)
-		} else {
-			e.mu.Lock()
-			e.leverageSetCache[c.Symbol] = targetLeverage
-			e.mu.Unlock()
-		}
-	}
-
-	tpPrice := CalculateDynamicTakeProfit(side, currentPrice, slPrice, 1.5, tickSize)
-
-	if !ValidateTakeProfit(side, currentPrice, tpPrice, 1.5) {
-		return fmt.Errorf("take profit validation failed for %s (entry: %.4f, tp: %.4f)", c.Symbol, currentPrice, tpPrice)
-	}
-
-	orderID, err := e.placeMarketOrder(ctx, c.Symbol, side, qty, qtyStep, slPrice, tpPrice, tickSize)
+	// Размещение ИСКЛЮЧИТЕЛЬНО Post-Only (Maker) Ордера
+	orderID, err := e.placePostOnlyOrder(ctx, c.Symbol, side, qty, qtyStep, entryPrice, slPrice, tpPrice, tickSize)
 	if err != nil {
-		return fmt.Errorf("order execution failed for %s: %w", c.Symbol, err)
+		return fmt.Errorf("post-only limit order failed for %s: %w", c.Symbol, err)
 	}
 
 	orderPlaced = true
-
-	log.Printf("[SUCCESS] Position opened: %s %s | Leverage: x%d | Price: %.4f | Qty: %s | SL: %s | TP: %s | OrderID: %s",
-		c.Symbol, side, targetLeverage, currentPrice, FormatStep(qty, qtyStep), FormatStep(slPrice, tickSize), FormatStep(tpPrice, tickSize), orderID)
-
-	go func(candidate models.Candidate, ordID string, p float64, q float64, lev int) {
-		btcTrend, _ := e.wsEngine.GetBTCTrend15m()
-		if err := SaveTradeSnapshot(candidate.Symbol, side, p, q, lev, ordID, candidate, btcTrend); err != nil {
-			log.Printf("[WARN] Failed to save trade snapshot for %s: %v", candidate.Symbol, err)
-		}
-	}(c, orderID, currentPrice, qty, targetLeverage)
+	log.Printf("[MAKER ENTRY] Symbol: %s | Side: %s | Qty: %.4f | Entry: %.4f | SL: %.4f | TP: %.4f | ID: %s",
+		c.Symbol, side, qty, entryPrice, slPrice, tpPrice, orderID)
 
 	e.mu.Lock()
 	e.positions[c.Symbol] = &models.PositionState{
-		Symbol:       c.Symbol,
-		Side:         side,
-		EntryPrice:   currentPrice,
-		Size:         qty,
-		StopLoss:     slPrice,
-		TakeProfit:   tpPrice,
-		HighestPrice: currentPrice,
-		LowestPrice:  currentPrice,
-		OpenedAt:     time.Now().UTC(),
+		Symbol:     c.Symbol,
+		Side:       side,
+		EntryPrice: entryPrice,
+		Size:       qty,
+		StopLoss:   slPrice,
+		TakeProfit: tpPrice,
+		OpenedAt:   time.Now().UTC(),
 	}
 	e.mu.Unlock()
 
 	return nil
 }
 
-func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, currentPrice float64) {
-	e.mu.Lock()
-	pos, active := e.positions[symbol]
-	if !active || pos.Side == "PENDING" || pos.Side != e.targetSide {
-		e.mu.Unlock()
-		return
-	}
-	e.mu.Unlock()
-
-	if wsPrice, ok := e.wsEngine.GetLatestPrice(symbol); ok && wsPrice > 0 {
-		currentPrice = wsPrice
-	}
-
-	if !e.hasActivePosition(ctx, symbol) {
-		log.Printf("[CLEANUP] Position %s closed on exchange. Activating 30m Post-Trade Cooldown.", symbol)
-		e.mu.Lock()
-		e.closedHistory[symbol] = pos
-		delete(e.positions, symbol)
-		e.cooldowns[symbol] = time.Now().Add(30 * time.Minute)
-		e.mu.Unlock()
-		return
+func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qty, qtyStep, price, sl, tp, tickSize float64) (string, error) {
+	params := map[string]interface{}{
+		"category":    "linear",
+		"symbol":      symbol,
+		"side":        side,
+		"orderType":   "Limit",
+		"qty":         FormatStep(qty, qtyStep),
+		"price":       FormatStep(price, tickSize),
+		"timeInForce": "PostOnly", // Защита от Taker Fees
+		"stopLoss":    FormatStep(sl, tickSize),
+		"takeProfit":  FormatStep(tp, tickSize),
+		"slTriggerBy": "LastPrice",
+		"tpTriggerBy": "LastPrice",
 	}
 
-	_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
+	resp, err := e.doSignedPOST(ctx, "/v5/order/create", params, symbol)
 	if err != nil {
-		tickSize = 0.0001
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	feeBufferPct := 0.0014
-	updatedSL := 0.0
-	shouldUpdate := false
-
-	if pos.Side == "Buy" {
-		if currentPrice > pos.HighestPrice {
-			pos.HighestPrice = currentPrice
-		}
-
-		maxProfitPct := (pos.HighestPrice - pos.EntryPrice) / pos.EntryPrice * 100.0
-
-		// БЛОКИРОВКА: Игнорируем подтяжку, если чистый профит движения не достиг 1.2%
-		if maxProfitPct < 1.2 {
-			return
-		}
-
-		// Фаза 1: Фиксация чистого безубытка + комиссии (1.2% - 1.8%)
-		newSL := RoundToStep(pos.EntryPrice*(1+feeBufferPct), tickSize)
-
-		// Фаза 2: Динамический трейлинг при движении выше 1.8%
-		if maxProfitPct >= 1.8 {
-			trailingDist := pos.HighestPrice * (e.cfg.TrailingPct / 100.0)
-			dynamicSL := RoundToStep(pos.HighestPrice-trailingDist, tickSize)
-			if dynamicSL > newSL {
-				newSL = dynamicSL
-			}
-		}
-
-		if newSL > pos.StopLoss && math.Abs(newSL-pos.StopLoss) >= tickSize {
-			pos.StopLoss = newSL
-			updatedSL = newSL
-			shouldUpdate = true
-		}
-
-	} else if pos.Side == "Sell" {
-		if pos.LowestPrice == 0 || currentPrice < pos.LowestPrice {
-			pos.LowestPrice = currentPrice
-		}
-
-		maxProfitPct := (pos.EntryPrice - pos.LowestPrice) / pos.EntryPrice * 100.0
-
-		if maxProfitPct < 1.2 {
-			return
-		}
-
-		newSL := RoundToStep(pos.EntryPrice*(1-feeBufferPct), tickSize)
-
-		if maxProfitPct >= 1.8 {
-			trailingDist := pos.LowestPrice * (e.cfg.TrailingPct / 100.0)
-			dynamicSL := RoundToStep(pos.LowestPrice+trailingDist, tickSize)
-			if dynamicSL < newSL {
-				newSL = dynamicSL
-			}
-		}
-
-		if (pos.StopLoss == 0 || newSL < pos.StopLoss) && math.Abs(newSL-pos.StopLoss) >= tickSize {
-			pos.StopLoss = newSL
-			updatedSL = newSL
-			shouldUpdate = true
-		}
-	}
-
-	if shouldUpdate {
-		log.Printf("[PHASE TRAILING] Updating SL for %s -> New SL: %s", symbol, FormatStep(updatedSL, tickSize))
-		if err := e.setTradingStop(ctx, symbol, pos.Side, updatedSL, tickSize); err != nil {
-			log.Printf("[ERROR] Failed to update SL on exchange for %s: %v", symbol, err)
-		}
-	}
-}
-
-func (e *Engine) LogActivePositions(ctx context.Context) {
-	e.syncClosedPositionsREST(ctx)
-	e.CheckStalePositions(ctx)
-
-	path := "/v5/position/list"
-	queryString := "category=linear&settleCoin=USDT"
-
-	body, err := e.doSignedGET(ctx, path, queryString)
-	if err != nil {
-		return
+		return "", err
 	}
 
 	var res struct {
 		Result struct {
-			List []struct {
-				Symbol        string `json:"symbol"`
-				Side          string `json:"side"`
-				Size          string `json:"size"`
-				AvgPrice      string `json:"avgPrice"`
-				UnrealisedPnl string `json:"unrealisedPnl"`
-				StopLoss      string `json:"stopLoss"`
-			} `json:"list"`
+			OrderId string `json:"orderId"`
 		} `json:"result"`
 	}
-
-	if err := json.Unmarshal(body, &res); err != nil {
-		return
+	if err := json.Unmarshal(resp, &res); err != nil {
+		return "", err
 	}
-
-	exchangeActive := make(map[string]bool)
-	targetSideCount := 0
-	totalSideUnrealizedPnL := 0.0
-	now := time.Now().UTC()
-
-	e.mu.Lock()
-
-	for sym, pos := range e.positions {
-		if pos.Side == "PENDING" && now.Sub(pos.OpenedAt) > 30*time.Second {
-			log.Printf("[CLEANUP] Expired PENDING state for %s. Refunding margin.", sym)
-			delete(e.positions, sym)
-			e.cachedBalance += e.cfg.MarginPerTradeUSD
-		}
-	}
-
-	for _, pos := range res.Result.List {
-		size, _ := strconv.ParseFloat(pos.Size, 64)
-		if size > 0 {
-			pnl, _ := strconv.ParseFloat(pos.UnrealisedPnl, 64)
-			avgPrice, _ := strconv.ParseFloat(pos.AvgPrice, 64)
-			currentSL, _ := strconv.ParseFloat(pos.StopLoss, 64)
-
-			if pos.Side == e.targetSide {
-				exchangeActive[pos.Symbol] = true
-				targetSideCount++
-				totalSideUnrealizedPnL += pnl
-
-				if state, exists := e.positions[pos.Symbol]; !exists || state.Side == "PENDING" {
-					e.positions[pos.Symbol] = &models.PositionState{
-						Symbol:       pos.Symbol,
-						Side:         pos.Side,
-						EntryPrice:   avgPrice,
-						Size:         size,
-						StopLoss:     currentSL,
-						HighestPrice: avgPrice,
-						LowestPrice:  avgPrice,
-						OpenedAt:     time.Now().UTC(),
-					}
-				} else {
-					if currentSL > 0 {
-						state.StopLoss = currentSL
-					}
-				}
-
-				log.Printf("[POS MONITOR] %s %s | Size: %s | Entry: %s | uPnL: %.4f USDT",
-					pos.Symbol, pos.Side, pos.Size, pos.AvgPrice, pnl)
-			}
-		}
-	}
-
-	for sym, pos := range e.positions {
-		if pos.Side != "PENDING" && pos.Side == e.targetSide && !exchangeActive[sym] {
-			log.Printf("[SYNC CLEANUP] Removing ghost position %s from state. Activating 30m Post-Trade Cooldown.", sym)
-			e.closedHistory[sym] = pos
-			delete(e.positions, sym)
-			e.cooldowns[sym] = time.Now().Add(30 * time.Minute)
-		}
-	}
-
-	if time.Since(e.lastBalanceCheck) > 3*time.Minute {
-		e.mu.Unlock()
-		_ = e.RefreshBalance(ctx)
-		e.mu.Lock()
-	}
-
-	balance := e.cachedBalance
-	e.mu.Unlock()
-
-	log.Printf("[SUMMARY] Strategy Target: %s | Active Positions: %d/%d | Wallet Balance: %.2f USDT | Target uPnL: %.4f USDT",
-		e.targetSide, targetSideCount, e.cfg.MaxActivePositions, balance, totalSideUnrealizedPnL)
-}
-
-func (e *Engine) fetchWalletBalance(ctx context.Context) (float64, error) {
-	path := "/v5/account/wallet-balance"
-	queryString := "accountType=UNIFIED"
-
-	body, err := e.doSignedGET(ctx, path, queryString)
-	if err != nil {
-		return 0, fmt.Errorf("wallet balance fetch failed: %w", err)
-	}
-
-	var res struct {
-		RetCode int    `json:"retCode"`
-		RetMsg  string `json:"retMsg"`
-		Result  struct {
-			List []struct {
-				Coin []struct {
-					Coin                string `json:"coin"`
-					AvailableToWithdraw string `json:"availableToWithdraw"`
-					WalletBalance       string `json:"walletBalance"`
-				} `json:"coin"`
-			} `json:"list"`
-		} `json:"result"`
-	}
-
-	if err := json.Unmarshal(body, &res); err != nil {
-		return 0, fmt.Errorf("failed to unmarshal balance JSON: %w", err)
-	}
-
-	if res.RetCode != 0 {
-		return 0, fmt.Errorf("bybit balance api error code=%d msg=%s", res.RetCode, res.RetMsg)
-	}
-
-	if len(res.Result.List) == 0 {
-		return 0.0, nil
-	}
-
-	for _, coin := range res.Result.List[0].Coin {
-		if coin.Coin == "USDT" {
-			if coin.AvailableToWithdraw != "" {
-				bal, err := strconv.ParseFloat(coin.AvailableToWithdraw, 64)
-				if err == nil && bal >= 0 {
-					return bal, nil
-				}
-			}
-			if coin.WalletBalance != "" {
-				bal, err := strconv.ParseFloat(coin.WalletBalance, 64)
-				if err == nil && bal >= 0 {
-					return bal, nil
-				}
-			}
-		}
-	}
-
-	return 0.0, nil
+	return res.Result.OrderId, nil
 }
 
 func (e *Engine) getLiveTicker(ctx context.Context, symbol string) (bid, ask, last float64, err error) {
@@ -799,14 +324,9 @@ func (e *Engine) getLiveTicker(ctx context.Context, symbol string) (bid, ask, la
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
+	body, _ := io.ReadAll(resp.Body)
 	var res struct {
-		RetCode int `json:"retCode"`
-		Result  struct {
+		Result struct {
 			List []struct {
 				Bid1Price string `json:"bid1Price"`
 				Ask1Price string `json:"ask1Price"`
@@ -815,41 +335,15 @@ func (e *Engine) getLiveTicker(ctx context.Context, symbol string) (bid, ask, la
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
-		return 0, 0, 0, fmt.Errorf("failed to parse ticker response for %s", symbol)
+	if json.Unmarshal(body, &res) != nil || len(res.Result.List) == 0 {
+		return 0, 0, 0, fmt.Errorf("ticker parse error")
 	}
 
 	item := res.Result.List[0]
 	bid, _ = strconv.ParseFloat(item.Bid1Price, 64)
 	ask, _ = strconv.ParseFloat(item.Ask1Price, 64)
 	last, _ = strconv.ParseFloat(item.LastPrice, 64)
-
 	return bid, ask, last, nil
-}
-
-func (e *Engine) hasActivePosition(ctx context.Context, symbol string) bool {
-	path := "/v5/position/list"
-	queryString := fmt.Sprintf("category=linear&symbol=%s", symbol)
-
-	body, err := e.doSignedGET(ctx, path, queryString)
-	if err != nil {
-		return false
-	}
-
-	var res struct {
-		Result struct {
-			List []struct {
-				Size string `json:"size"`
-			} `json:"list"`
-		} `json:"result"`
-	}
-
-	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
-		return false
-	}
-
-	size, _ := strconv.ParseFloat(res.Result.List[0].Size, 64)
-	return size > 0
 }
 
 func (e *Engine) getInstrumentLimits(ctx context.Context, symbol string) (qtyStep, minQty, tickSize, minNotional float64, err error) {
@@ -865,14 +359,9 @@ func (e *Engine) getInstrumentLimits(ctx context.Context, symbol string) (qtySte
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-
+	body, _ := io.ReadAll(resp.Body)
 	var res struct {
-		RetCode int `json:"retCode"`
-		Result  struct {
+		Result struct {
 			List []struct {
 				PriceFilter struct {
 					TickSize string `json:"tickSize"`
@@ -886,8 +375,8 @@ func (e *Engine) getInstrumentLimits(ctx context.Context, symbol string) (qtySte
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(body, &res); err != nil || len(res.Result.List) == 0 {
-		return 0, 0, 0, 0, fmt.Errorf("symbol info not found or unmarshal error: %w", err)
+	if json.Unmarshal(body, &res) != nil || len(res.Result.List) == 0 {
+		return 0, 0, 0, 0, fmt.Errorf("specs parse error")
 	}
 
 	item := res.Result.List[0]
@@ -924,62 +413,9 @@ func (e *Engine) setLeverage(ctx context.Context, symbol string, leverage int) e
 	return err
 }
 
-func (e *Engine) placeMarketOrder(ctx context.Context, symbol, side string, qty, qtyStep, sl, tp, tickSize float64) (string, error) {
-	bid, ask, last, err := e.getLiveTicker(ctx, symbol)
-	if err == nil && last > 0 {
-		execPrice := ask
-		if side == "Sell" {
-			execPrice = bid
-		}
-		priceDevPct := math.Abs(execPrice-last) / last * 100.0
-		if priceDevPct > 0.08 {
-			return "", fmt.Errorf("rejected market order for %s: execution price deviation %.3f%% exceeds max 0.08%% limit", symbol, priceDevPct)
-		}
-	}
-
-	params := map[string]interface{}{
-		"category":    "linear",
-		"symbol":      symbol,
-		"side":        side,
-		"orderType":   "Market",
-		"qty":         FormatStep(qty, qtyStep),
-		"timeInForce": "GTC",
-		"stopLoss":    FormatStep(sl, tickSize),
-		"takeProfit":  FormatStep(tp, tickSize),
-		"slTriggerBy": "LastPrice",
-		"tpTriggerBy": "LastPrice",
-	}
-	resp, err := e.doSignedPOST(ctx, "/v5/order/create", params, symbol)
-	if err != nil {
-		return "", err
-	}
-
-	var res struct {
-		Result struct {
-			OrderId string `json:"orderId"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &res); err != nil {
-		return "", err
-	}
-	return res.Result.OrderId, nil
-}
-
-func (e *Engine) setTradingStop(ctx context.Context, symbol, side string, sl, tickSize float64) error {
-	params := map[string]interface{}{
-		"category":    "linear",
-		"symbol":      symbol,
-		"stopLoss":    FormatStep(sl, tickSize),
-		"positionIdx": 0,
-	}
-	_, err := e.doSignedPOST(ctx, "/v5/position/trading-stop", params, symbol)
-	return err
-}
-
 func (e *Engine) doSignedGET(ctx context.Context, path, queryString string) ([]byte, error) {
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	recvWindow := "5000"
-
 	rawSignature := timestamp + e.cfg.ApiKey + recvWindow + queryString
 
 	h := hmac.New(sha256.New, []byte(e.cfg.ApiSecret))
@@ -1002,16 +438,11 @@ func (e *Engine) doSignedGET(ctx context.Context, path, queryString string) ([]b
 		return nil, err
 	}
 	defer resp.Body.Close()
-
 	return io.ReadAll(resp.Body)
 }
 
 func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[string]interface{}, symbol string) ([]byte, error) {
-	jsonBody, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
+	jsonBody, _ := json.Marshal(payload)
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	recvWindow := "5000"
 	rawSignature := timestamp + e.cfg.ApiKey + recvWindow + string(jsonBody)
@@ -1036,30 +467,20 @@ func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[stri
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+	body, _ := io.ReadAll(resp.Body)
 
 	var apiRes struct {
 		RetCode int    `json:"retCode"`
 		RetMsg  string `json:"retMsg"`
 	}
-	if err := json.Unmarshal(body, &apiRes); err != nil {
-		return nil, err
-	}
-
-	if apiRes.RetCode == 110126 {
-		e.mu.Lock()
-		e.disabledTokens[symbol] = true
-		e.mu.Unlock()
-		log.Printf("[BLACKLIST] Token %s disabled due to missing user agreement (code 110126)", symbol)
-	}
+	_ = json.Unmarshal(body, &apiRes)
 
 	if apiRes.RetCode != 0 && apiRes.RetCode != 110043 && apiRes.RetCode != 110026 {
-		return nil, fmt.Errorf("bybit api error code=%d: %s", apiRes.RetCode, apiRes.RetMsg)
+		return nil, fmt.Errorf("bybit api code=%d: %s", apiRes.RetCode, apiRes.RetMsg)
 	}
 
 	return body, nil
 }
+
+func (e *Engine) LogActivePositions(ctx context.Context)                                {}
+func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, price float64) {}

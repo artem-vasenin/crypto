@@ -42,3 +42,11 @@
 * `models/market.go` — Go-структуры рыночных данных, свечей, индикаторов, уровня и стакана.
 * `models/execution.go` — Структуры конфигурации бота и состояния позиций.
 * `output/json.go` — Атомарная запись результатов скринера на диск через `.tmp`-замену и проверка MD5-хэша от изменений.
+
+---------
+
+internal/analysis/service.go — базовый координатор аналитического процесса. Выполняет первичный отбор инструментов, прогрев исторический данных, запуск парсинга и агрегацию финального models.ScreeningResult.  
+internal/strategies/long.go и internal/strategies/short.go — модули оценки качества кандидатов по жестким фильтрам (Hard Gates) и весовой системе (Scoring).  
+internal/structure/structure.go — модуль распознавания локальных структур рыночных экстремумов (Pivot Highs/Lows) и построения уровней поддержки/сопротивления.  
+internal/indicators/indicators.go — математический блок расчета технических показателей (RSI по Уайдлеру, ATR, VolumeRatio, VolumeTrend).  
+internal/bybit/ws_orderbook.go и ws_klines.go — вью-кэши, предоставляющие свежие метрики спреда, стакана (Imbalance) и свечей реального времени.  

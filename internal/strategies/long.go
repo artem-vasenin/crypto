@@ -1,4 +1,3 @@
-// internal/strategies/long.go
 package strategies
 
 import (
@@ -15,80 +14,65 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	st1 := c.Structure["1h"]
 	st4 := c.Structure["4h"]
 
-	// 1. HARD GATES (Каскадная защита)
+	// 1. HARD GATES (Исправлены завышенные пороги)
 
-	// Блокировка 1: Глобальный даунтренд (1h + 4h)
+	// Запрет Long при явном даунтренде старших TF
 	if st1.HighState == "LH" && st1.LowState == "LL" && st4.HighState == "LH" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "confirmed macro downtrend (1h+4h LH)"}
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "macro downtrend 1h+4h"}
 	}
 
-	// Блокировка 2: Ловля падающих ножей на 15m
-	if st15.HighState == "LH" && st15.LowState == "LL" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "15m active micro-downtrend (LH+LL) - wait for pivot confirmation"}
-	}
-
-	// Блокировка 3: Отсутствие бычьего разворотного триггера на 5m
+	// Фильтр падающего ножа: запрет если 5m совершает импульсный пробой вниз
 	if st5.HighState == "LH" && st5.LowState == "LL" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "5m micro breakdown active (no entry trigger)"}
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "5m active falling knife"}
 	}
 
-	if c.Indicators.ATR1hPct > 4.0 || c.Indicators.ATR15m == 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "excessive/invalid volatility"}
+	if c.Indicators.ATR1hPct > 5.0 || c.Indicators.ATR15m == 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "invalid volatility"}
 	}
 
-	if c.Market.SpreadPct > 0.08 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "spread exceeds 0.08% threshold"}
+	if c.Market.SpreadPct > 0.15 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "spread > 0.15%"}
 	}
 
-	if c.OrderBook.ImbalancePct < 3.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient bid dominance in orderbook (imbalance < +3%)"}
+	if c.OrderBook.ImbalancePct < 1.5 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "no bid imbalance in orderbook (<1.5%)"}
 	}
 
-	if c.Derivatives.FundingRate > 0.0003 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "overheated funding rate (>0.03%)"}
+	if c.Derivatives.FundingRate > 0.0005 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "overheated funding (>0.05%)"}
 	}
 
-	if c.Levels.RangePositionPct > 35.0 && c.Levels.NearestResistance > 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry outside pullback zone (>35% range position)"}
+	// Расширен диапазон входа отката с 35% до 50%
+	if c.Levels.RangePositionPct > 50.0 && c.Levels.NearestResistance > 0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "price too close to resistance (>50% range)"}
 	}
 
-	if c.Indicators.RSI1h >= 65.0 || c.Indicators.RSI1h < 38.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h invalid for pullback entry"}
+	if c.Indicators.RSI1h >= 70.0 || c.Indicators.RSI1h < 30.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "RSI 1h out of range"}
 	}
 
-	priceUp := c.Market.Change24h > 0
-	oiUp := c.Derivatives.OpenInterestChange > 0.25
-
-	if !oiUp {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient Open Interest influx (<0.25%)"}
+	// Смягчен порог притока Open Interest с 0.25% до 0.05%
+	if c.Derivatives.OpenInterestChange < 0.05 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "insufficient OI expansion (<0.05%)"}
 	}
 
 	score := 0.0
 
-	// 2. SCORING
-	if priceUp {
-		score += 10
-	}
-
-	if st5.HighState == "HH" || st5.LowState == "HL" {
+	// 2. SCORING SYSTEM
+	if c.Market.Change24h > 0 {
 		score += 15
+	}
+	if st5.HighState == "HH" || st5.LowState == "HL" {
+		score += 20
 	}
 	if st15.HighState == "HH" || st15.LowState == "HL" {
-		score += 15
+		score += 20
 	}
 	if st1.HighState == "HH" || st1.LowState == "HL" {
+		score += 25
+	}
+	if c.Levels.RangePositionPct >= 5.0 && c.Levels.RangePositionPct <= 35.0 {
 		score += 20
-	}
-	if st4.HighState == "HH" || st4.LowState == "HL" {
-		score += 10
-	}
-
-	if c.Levels.RangePositionPct >= 5.0 && c.Levels.RangePositionPct <= 25.0 {
-		score += 20
-	}
-
-	if c.OrderBook.ImbalancePct > 10.0 {
-		score += 10
 	}
 
 	score = clamp(score)
@@ -96,6 +80,6 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	return models.StrategyResult{
 		Score:  score,
 		Status: status(score),
-		Reason: "multi-tf pullback confirmation (5m-4h) + OI expansion + L2 backing",
+		Reason: "long candidate passed filtered criteria",
 	}
 }

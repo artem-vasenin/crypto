@@ -1,4 +1,3 @@
-// internal/execution/risk.go
 package execution
 
 import (
@@ -15,8 +14,8 @@ func CalculateDynamicStopLoss(side string, entryPrice, pivotLevel, atr1h float64
 		return 0
 	}
 
-	if atrMultiplier < 1.2 {
-		atrMultiplier = 1.5 // Оптимальный коэффициент фильтрации шума
+	if atrMultiplier < 1.5 {
+		atrMultiplier = 1.5
 	}
 
 	minDistance := atr1h * atrMultiplier
@@ -40,14 +39,14 @@ func CalculateDynamicStopLoss(side string, entryPrice, pivotLevel, atr1h float64
 	return rawSL
 }
 
-// CalculateDynamicTakeProfit рассчитывает Take-Profit с привязкой к Risk/Reward
+// CalculateDynamicTakeProfit рассчитывает Take-Profit с привязкой к жесткому R:R >= 2.0
 func CalculateDynamicTakeProfit(side string, entryPrice, slPrice, minRR float64, tickStep float64) float64 {
 	if entryPrice <= 0 || slPrice <= 0 {
 		return 0
 	}
 
-	if minRR < 1.2 {
-		minRR = 1.5
+	if minRR < 2.0 {
+		minRR = 2.0 // Фиксированное минимальное математическое ожидание R:R 1:2
 	}
 
 	slDistance := math.Abs(entryPrice - slPrice)
@@ -74,28 +73,16 @@ func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeve
 	}
 
 	res, ok := c.Strategies[targetStrategy]
-	if !ok || res.Score < 55.0 {
+	if !ok || res.Score < 50.0 {
 		return 1
 	}
 
-	scoreFactor := 1.0
-	if res.Score < 75.0 {
-		scoreFactor = 0.66
-	}
-
 	volatilityFactor := 1.0
-	if c.Indicators.ATR1hPct > 3.5 {
-		volatilityFactor = 0.33
-	} else if c.Indicators.ATR1hPct > 2.0 {
-		volatilityFactor = 0.66
+	if c.Indicators.ATR1hPct > 3.0 {
+		volatilityFactor = 0.5
 	}
 
-	liquidityFactor := 1.0
-	if c.Market.Turnover24h < 2000000.0 {
-		liquidityFactor = 0.5
-	}
-
-	calculatedLeverage := float64(maxLeverage) * scoreFactor * volatilityFactor * liquidityFactor
+	calculatedLeverage := float64(maxLeverage) * volatilityFactor
 	finalLeverage := int(math.Floor(calculatedLeverage))
 
 	if finalLeverage < 1 {
@@ -114,7 +101,6 @@ func CalculatePositionQty(marginUSD float64, leverage int, price, qtyStep, minQt
 	}
 
 	targetMinNotional := math.Max(minNotional*1.05, 5.25)
-
 	targetNotional := marginUSD * float64(leverage)
 	if targetNotional < targetMinNotional {
 		targetNotional = targetMinNotional
@@ -157,7 +143,6 @@ func FormatStep(val, step float64) string {
 	return strconv.FormatFloat(RoundToStep(val, step), 'f', precision, 64)
 }
 
-// ValidateStopLoss проверяет отступ SL относительно ATR % волатильности
 func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct, atr1hPct float64) bool {
 	if slPrice <= 0 || entryPrice <= 0 {
 		return false
@@ -178,9 +163,7 @@ func ValidateStopLoss(side string, entryPrice, slPrice, maxRiskPct, atr1hPct flo
 		return false
 	}
 
-	// Отступ SL обязан перекрывать рыночный шум 1h ATR минимум на 1.2x
-	minRequiredDist := math.Max(1.2, atr1hPct*1.2)
-
+	minRequiredDist := math.Max(0.8, atr1hPct*1.0)
 	return distPct >= minRequiredDist && distPct <= maxRiskPct
 }
 
@@ -204,6 +187,5 @@ func ValidateTakeProfit(side string, entryPrice, tpPrice, minProfitPct float64) 
 		return false
 	}
 
-	effectiveMinProfit := math.Max(minProfitPct, 1.5)
-	return distPct >= effectiveMinProfit && distPct <= 20.0
+	return distPct >= 1.5 && distPct <= 15.0
 }
