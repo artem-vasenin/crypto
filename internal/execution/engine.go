@@ -34,6 +34,7 @@ type Engine struct {
 	wsEngine         *WSEngine
 	targetSide       string
 	processedExecs   map[string]time.Time
+	candidatesCache  map[string]models.Candidate
 }
 
 func NewEngine(cfg models.BotConfig, strategy string) *Engine {
@@ -58,6 +59,7 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 		leverageSetCache: make(map[string]int),
 		targetSide:       targetSide,
 		processedExecs:   make(map[string]time.Time),
+		candidatesCache:  make(map[string]models.Candidate),
 	}
 
 	e.wsEngine = NewWSEngine(
@@ -74,10 +76,10 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 
 func (e *Engine) InitWebSocket(ctx context.Context) error {
 	if err := e.wsEngine.StartPublicTickerStream(ctx); err != nil {
-		log.Printf("[WARN] Public WS failed: %v", err)
+		log.Printf("[WARN] Public WS stream init failed: %v", err)
 	}
 	if err := e.wsEngine.StartPrivateStream(ctx); err != nil {
-		log.Printf("[WARN] Private WS failed: %v", err)
+		log.Printf("[WARN] Private WS stream init failed: %v", err)
 	}
 	return nil
 }
@@ -91,18 +93,62 @@ func (e *Engine) handleBalanceUpdateWS(balance float64) {
 
 func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	pos, exists := e.positions[exec.Symbol]
-	if !exists || exec.ClosedSize <= 0 {
-		return
+	candidate, candExists := e.candidatesCache[exec.Symbol]
+	e.mu.Unlock()
+
+	// 1. Позиция заполнена -> Выставляем SL/TP по MarkPrice от фактической цены исполнения
+	if exists && exec.ExecQty > 0 && exec.ClosedSize == 0 {
+		log.Printf("[EXEC CONFIRMED] %s %s | Filled Qty: %.4f @ ExecPrice: %.4f. Attaching Risk Levels...",
+			exec.Symbol, exec.Side, exec.ExecQty, exec.ExecPrice)
+
+		go func(symbol string, side string, execPrice float64, cand models.Candidate, hasCand bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			_, _, tickSize, _, err := e.getInstrumentLimits(ctx, symbol)
+			if err != nil {
+				tickSize = 0.0001
+			}
+
+			pivotLevel := cand.Levels.NearestSupport
+			atr1h := cand.Indicators.ATR1h
+
+			if side == "Sell" {
+				pivotLevel = cand.Levels.NearestResistance
+			}
+
+			if !hasCand || atr1h <= 0 {
+				atr1h = execPrice * 0.015
+				pivotLevel = execPrice * 0.985
+				if side == "Sell" {
+					pivotLevel = execPrice * 1.015
+				}
+			}
+
+			slPrice := CalculateDynamicStopLoss(side, execPrice, pivotLevel, atr1h, 1.5, tickSize)
+			tpPrice := CalculateDynamicTakeProfit(side, execPrice, slPrice, 2.0, tickSize)
+
+			if err := e.SetTradingStopMarkPrice(ctx, symbol, side, slPrice, tpPrice, tickSize); err != nil {
+				log.Printf("[ERROR] Failed to attach MarkPrice SL/TP for %s: %v", symbol, err)
+			} else {
+				log.Printf("[RISK ATTACHED] %s %s | ExecPrice: %.4f | SL: %.4f | TP: %.4f (MarkPrice Trigger)",
+					symbol, side, execPrice, slPrice, tpPrice)
+			}
+		}(exec.Symbol, exec.Side, exec.ExecPrice, candidate, candExists)
 	}
 
-	pos.Size -= exec.ClosedSize
-	if pos.Size <= 0.000001 {
-		e.closedHistory[exec.Symbol] = pos
-		delete(e.positions, exec.Symbol)
-		e.cooldowns[exec.Symbol] = time.Now().Add(15 * time.Minute)
+	// 2. Закрытие позиции
+	if exists && exec.ClosedSize > 0 {
+		e.mu.Lock()
+		pos.Size -= exec.ClosedSize
+		if pos.Size <= 0.000001 {
+			e.closedHistory[exec.Symbol] = pos
+			delete(e.positions, exec.Symbol)
+			delete(e.candidatesCache, exec.Symbol)
+			e.cooldowns[exec.Symbol] = time.Now().Add(15 * time.Minute)
+		}
+		e.mu.Unlock()
 	}
 }
 
@@ -113,6 +159,7 @@ func (e *Engine) handlePositionClosedWS(symbol string) {
 	if pos, active := e.positions[symbol]; active {
 		e.closedHistory[symbol] = pos
 		delete(e.positions, symbol)
+		delete(e.candidatesCache, symbol)
 		e.cooldowns[symbol] = time.Now().Add(15 * time.Minute)
 	}
 }
@@ -150,7 +197,7 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 			}
 		}
 	}
-	return fmt.Errorf("failed to parse wallet balance")
+	return fmt.Errorf("failed to parse wallet balance from Bybit response")
 }
 
 func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targetStrategy string) error {
@@ -166,6 +213,8 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	}
 
 	e.mu.Lock()
+	e.candidatesCache[c.Symbol] = c
+
 	if _, active := e.positions[c.Symbol]; active || e.disabledTokens[c.Symbol] {
 		e.mu.Unlock()
 		return nil
@@ -188,12 +237,12 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 
 	if sidePositionsCount >= e.cfg.MaxActivePositions {
 		e.mu.Unlock()
-		return nil
+		return fmt.Errorf("max active positions reached")
 	}
 
 	if e.cachedBalance < e.cfg.MarginPerTradeUSD {
 		e.mu.Unlock()
-		return fmt.Errorf("insufficient balance: available %.2f USD", e.cachedBalance)
+		return fmt.Errorf("insufficient balance")
 	}
 
 	e.positions[c.Symbol] = &models.PositionState{
@@ -233,18 +282,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		entryPrice = bidPrice
 	}
 
-	pivotLevel := c.Levels.NearestSupport
-	if side == "Sell" {
-		pivotLevel = c.Levels.NearestResistance
-	}
-
-	slPrice := CalculateDynamicStopLoss(side, entryPrice, pivotLevel, c.Indicators.ATR1h, 1.5, tickSize)
-	tpPrice := CalculateDynamicTakeProfit(side, entryPrice, slPrice, 2.0, tickSize)
-
-	if !ValidateStopLoss(side, entryPrice, slPrice, 4.0, c.Indicators.ATR1hPct) || !ValidateTakeProfit(side, entryPrice, tpPrice, 1.5) {
-		return fmt.Errorf("validation failed for %s SL: %.4f | TP: %.4f", c.Symbol, slPrice, tpPrice)
-	}
-
 	targetLeverage := CalculateDynamicLeverage(c, targetStrategy, e.cfg.MaxLeverage)
 	qty := CalculatePositionQty(e.cfg.MarginPerTradeUSD, targetLeverage, entryPrice, qtyStep, minQty, minNotional)
 
@@ -255,15 +292,14 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	_ = e.setTradeModeIsolated(ctx, c.Symbol, targetLeverage)
 	_ = e.setLeverage(ctx, c.Symbol, targetLeverage)
 
-	// Размещение ИСКЛЮЧИТЕЛЬНО Post-Only (Maker) Ордера
-	orderID, err := e.placePostOnlyOrder(ctx, c.Symbol, side, qty, qtyStep, entryPrice, slPrice, tpPrice, tickSize)
+	orderID, err := e.placePostOnlyOrder(ctx, c.Symbol, side, qty, qtyStep, entryPrice, tickSize)
 	if err != nil {
 		return fmt.Errorf("post-only limit order failed for %s: %w", c.Symbol, err)
 	}
 
 	orderPlaced = true
-	log.Printf("[MAKER ENTRY] Symbol: %s | Side: %s | Qty: %.4f | Entry: %.4f | SL: %.4f | TP: %.4f | ID: %s",
-		c.Symbol, side, qty, entryPrice, slPrice, tpPrice, orderID)
+	log.Printf("[MAKER ORDER PLACED] Symbol: %s | Side: %s | Qty: %.4f | Price: %.4f | OrderID: %s",
+		c.Symbol, side, qty, entryPrice, orderID)
 
 	e.mu.Lock()
 	e.positions[c.Symbol] = &models.PositionState{
@@ -271,8 +307,6 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 		Side:       side,
 		EntryPrice: entryPrice,
 		Size:       qty,
-		StopLoss:   slPrice,
-		TakeProfit: tpPrice,
 		OpenedAt:   time.Now().UTC(),
 	}
 	e.mu.Unlock()
@@ -280,7 +314,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, c models.Candidate, targe
 	return nil
 }
 
-func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qty, qtyStep, price, sl, tp, tickSize float64) (string, error) {
+func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qty, qtyStep, price, tickSize float64) (string, error) {
 	params := map[string]interface{}{
 		"category":    "linear",
 		"symbol":      symbol,
@@ -288,11 +322,7 @@ func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qt
 		"orderType":   "Limit",
 		"qty":         FormatStep(qty, qtyStep),
 		"price":       FormatStep(price, tickSize),
-		"timeInForce": "PostOnly", // Защита от Taker Fees
-		"stopLoss":    FormatStep(sl, tickSize),
-		"takeProfit":  FormatStep(tp, tickSize),
-		"slTriggerBy": "LastPrice",
-		"tpTriggerBy": "LastPrice",
+		"timeInForce": "PostOnly",
 	}
 
 	resp, err := e.doSignedPOST(ctx, "/v5/order/create", params, symbol)
@@ -301,14 +331,35 @@ func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qt
 	}
 
 	var res struct {
-		Result struct {
+		RetCode int    `json:"retCode"`
+		RetMsg  string `json:"retMsg"`
+		Result  struct {
 			OrderId string `json:"orderId"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &res); err != nil {
 		return "", err
 	}
+
+	if res.RetCode != 0 {
+		return "", fmt.Errorf("bybit api retCode=%d: %s", res.RetCode, res.RetMsg)
+	}
+
 	return res.Result.OrderId, nil
+}
+
+func (e *Engine) SetTradingStopMarkPrice(ctx context.Context, symbol, side string, sl, tp, tickSize float64) error {
+	params := map[string]interface{}{
+		"category":    "linear",
+		"symbol":      symbol,
+		"stopLoss":    FormatStep(sl, tickSize),
+		"takeProfit":  FormatStep(tp, tickSize),
+		"slTriggerBy": "MarkPrice",
+		"tpTriggerBy": "MarkPrice",
+		"positionIdx": 0,
+	}
+	_, err := e.doSignedPOST(ctx, "/v5/position/trading-stop", params, symbol)
+	return err
 }
 
 func (e *Engine) getLiveTicker(ctx context.Context, symbol string) (bid, ask, last float64, err error) {
@@ -474,6 +525,13 @@ func (e *Engine) doSignedPOST(ctx context.Context, path string, payload map[stri
 		RetMsg  string `json:"retMsg"`
 	}
 	_ = json.Unmarshal(body, &apiRes)
+
+	if apiRes.RetCode == 110126 {
+		e.mu.Lock()
+		e.disabledTokens[symbol] = true
+		e.mu.Unlock()
+		log.Printf("[BLACKLIST] Token %s disabled: missing user agreement (110126)", symbol)
+	}
 
 	if apiRes.RetCode != 0 && apiRes.RetCode != 110043 && apiRes.RetCode != 110026 {
 		return nil, fmt.Errorf("bybit api code=%d: %s", apiRes.RetCode, apiRes.RetMsg)

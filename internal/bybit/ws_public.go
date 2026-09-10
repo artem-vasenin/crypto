@@ -1,4 +1,3 @@
-// internal/bybit/ws_public.go
 package bybit
 
 import (
@@ -13,6 +12,8 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+const defaultWsURL = "wss://stream.bybit.com/v5/public/linear"
 
 type PublicWSStream struct {
 	obCache    *OrderBookCache
