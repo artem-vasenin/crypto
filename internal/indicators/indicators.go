@@ -89,8 +89,12 @@ func VolumeRatio(candles []models.Candle, period int) float64 {
 	completed := candles[:n-1]
 	lastCompleted := completed[len(completed)-1]
 
+	if len(completed) < period+1 {
+		return 1.0
+	}
+
 	var sum float64
-	start := len(completed) - period
+	start := len(completed) - period - 1
 	for i := start; i < len(completed)-1; i++ {
 		sum += completed[i].Turnover
 	}

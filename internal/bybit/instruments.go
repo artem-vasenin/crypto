@@ -38,6 +38,7 @@ func (c *Client) Instruments(ctx context.Context) ([]models.Instrument, error) {
 					MinOrderQty      string `json:"minOrderQty"`
 					QtyStep          string `json:"qtyStep"`
 					MinNotionalValue string `json:"minNotionalValue"`
+					MaxOrderQty      string `json:"maxOrderQty"`
 				} `json:"lotSizeFilter"`
 				FundingInterval int `json:"fundingInterval"`
 			} `json:"list"`
@@ -65,6 +66,7 @@ func (c *Client) Instruments(ctx context.Context) ([]models.Instrument, error) {
 				MinOrderQty:     f(x.LotSizeFilter.MinOrderQty),
 				QtyStep:         f(x.LotSizeFilter.QtyStep),
 				MinNotional:     f(x.LotSizeFilter.MinNotionalValue),
+				MaxOrderQty:     f(x.LotSizeFilter.MaxOrderQty),
 				FundingInterval: x.FundingInterval,
 			})
 		}

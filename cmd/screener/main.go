@@ -52,7 +52,7 @@ func main() {
 
 	log.Printf("[INFO] Daemon active. Primary Strategy: %s | Execution Interval: %s", strategy.Name(), *interval)
 
-	executeScreening(ctx, service, strategy.Name(), outFileName)
+	executeScreening(ctx, service, strategy.Name(), outFileName, cfg.RunTimeout)
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -63,13 +63,16 @@ func main() {
 			log.Println("[INFO] Shutdown signal received. Terminating Screener Daemon...")
 			return
 		case <-ticker.C:
-			executeScreening(ctx, service, strategy.Name(), outFileName)
+			executeScreening(ctx, service, strategy.Name(), outFileName, cfg.RunTimeout)
 		}
 	}
 }
 
-func executeScreening(ctx context.Context, service *analysis.Service, strategyName, outFileName string) {
-	runCtx, runCancel := context.WithTimeout(ctx, 2*time.Minute)
+func executeScreening(ctx context.Context, service *analysis.Service, strategyName, outFileName string, runTimeout time.Duration) {
+	if runTimeout <= 0 {
+		runTimeout = 2 * time.Minute
+	}
+	runCtx, runCancel := context.WithTimeout(ctx, runTimeout)
 	defer runCancel()
 
 	start := time.Now()

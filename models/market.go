@@ -15,6 +15,7 @@ type Instrument struct {
 	QtyStep         float64   `json:"qty_step"`
 	MinOrderQty     float64   `json:"min_order_qty"`
 	MinNotional     float64   `json:"min_notional"`
+	MaxOrderQty     float64   `json:"max_order_qty"`
 	FundingInterval int       `json:"funding_interval_min"`
 }
 
@@ -106,6 +107,7 @@ type Derivatives struct {
 	OpenInterest       float64 `json:"open_interest"`
 	OpenInterestChange float64 `json:"open_interest_change_pct"`
 	SpreadPct          float64 `json:"spread_pct"`
+	DataAgeSeconds     float64 `json:"data_age_seconds"`
 }
 
 type OrderBookMetrics struct {

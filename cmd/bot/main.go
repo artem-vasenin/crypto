@@ -1,4 +1,3 @@
-// cmd/bot/main.go
 package main
 
 import (
@@ -20,19 +19,21 @@ import (
 )
 
 func main() {
-	strategyName := flag.String("strategy", "long", "target strategy for automated trade execution")
+	strategyName := flag.String("strategy", "long", "long or short")
 	configPath := flag.String("config", "configs/config.json", "path to configuration file")
 	inputFile := flag.String("input", "long-screening.json", "path to input screening result JSON")
 	flag.Parse()
+
+	if *strategyName != "long" && *strategyName != "short" {
+		log.Fatalf("[FATAL] Bot supports only long and short execution. Grid strategies are screening-only.")
+	}
 
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 
 	if err := godotenv.Load(); err != nil {
-		log.Println("[INFO] .env file not found, falling back to system environment variables")
+		log.Println("[INFO] .env file not found, using system environment variables")
 	}
-
-	log.Println("[INFO] Initializing Execution Engine Service...")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -41,27 +42,36 @@ func main() {
 
 	apiKey := os.Getenv("BYBIT_API_KEY")
 	apiSecret := os.Getenv("BYBIT_API_SECRET")
-
 	if apiKey == "" || apiSecret == "" {
-		log.Fatalf("[FATAL] Environment variables BYBIT_API_KEY and BYBIT_API_SECRET must be set")
+		log.Fatalf("[FATAL] BYBIT_API_KEY and BYBIT_API_SECRET must be set")
 	}
 
 	checkInterval, err := time.ParseDuration(cfg.Execution.CheckInterval)
 	if err != nil {
-		checkInterval = 1 * time.Minute
+		checkInterval = time.Minute
+	}
+	pendingTimeout, err := time.ParseDuration(cfg.Execution.PendingOrderTimeout)
+	if err != nil {
+		pendingTimeout = 5 * time.Minute
 	}
 
 	botCfg := models.BotConfig{
-		ApiKey:             apiKey,
-		ApiSecret:          apiSecret,
-		Testnet:            cfg.Execution.Testnet,
-		MaxLeverage:        cfg.Execution.MaxLeverage,
-		MarginPerTradeUSD:  cfg.Execution.MarginPerTradeUSD,
-		MaxTotalMarginUSD:  cfg.Execution.MaxTotalMarginUSD,
-		MaxActivePositions: cfg.Execution.MaxActivePositions,
-		MinScore:           cfg.Execution.MinScore,
-		TrailingPct:        cfg.Execution.TrailingPct,
-		CheckInterval:      checkInterval,
+		ApiKey:              apiKey,
+		ApiSecret:           apiSecret,
+		Testnet:             cfg.Execution.Testnet,
+		MaxLeverage:         cfg.Execution.MaxLeverage,
+		MarginPerTradeUSD:   cfg.Execution.MarginPerTradeUSD,
+		MaxTotalMarginUSD:   cfg.Execution.MaxTotalMarginUSD,
+		MaxActivePositions:  cfg.Execution.MaxActivePositions,
+		MinScore:            cfg.Execution.MinScore,
+		TrailingPct:         cfg.Execution.TrailingPct,
+		CheckInterval:       checkInterval,
+		PendingOrderTimeout: pendingTimeout,
+		MakerFeeRate:        cfg.Execution.MakerFeeRate,
+		TakerFeeRate:        cfg.Execution.TakerFeeRate,
+		ExtraCostPct:        cfg.Execution.ExtraCostPct,
+		MaxStopLossPct:      cfg.Execution.MaxStopLossPct,
+		MinNetProfitPct:     cfg.Execution.MinNetProfitPct,
 	}
 
 	engine := execution.NewEngine(botCfg, *strategyName)
@@ -70,16 +80,21 @@ func main() {
 	defer cancel()
 
 	if err := engine.InitWebSocket(ctx); err != nil {
-		log.Printf("[WARN] WebSocket initialization warning: %v", err)
+		log.Fatalf("[FATAL] WebSocket initialization failed: %v", err)
 	}
-
-	if err := engine.RefreshBalance(ctx); err != nil {
-		log.Printf("[ERROR] Initial balance refresh failed: %v", err)
+	if err := engine.RefreshState(ctx); err != nil {
+		log.Fatalf("[FATAL] Initial account state refresh failed: %v", err)
 	}
 	engine.LogActivePositions(ctx)
 
-	log.Printf("[INFO] Engine Active. Strategy: %s | Margin/Trade: $%.2f | MaxMargin: $%.2f | MaxPos: %d | Leverage: x%d | Testnet: %v",
-		*strategyName, botCfg.MarginPerTradeUSD, botCfg.MaxTotalMarginUSD, botCfg.MaxActivePositions, botCfg.MaxLeverage, botCfg.Testnet)
+	log.Printf("[INFO] Bot active | strategy=%s margin=$%.2f max_margin=$%.2f max_positions=%d leverage<=x%d testnet=%v",
+		*strategyName,
+		botCfg.MarginPerTradeUSD,
+		botCfg.MaxTotalMarginUSD,
+		botCfg.MaxActivePositions,
+		botCfg.MaxLeverage,
+		botCfg.Testnet,
+	)
 
 	ticker := time.NewTicker(botCfg.CheckInterval)
 	defer ticker.Stop()
@@ -89,7 +104,7 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[INFO] Shutdown signal received. Closing connections...")
+			log.Println("[INFO] Shutdown signal received")
 			return
 		case <-ticker.C:
 			processIteration(ctx, engine, *inputFile, *strategyName, cfg.Concurrency)
@@ -102,41 +117,36 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 		return
 	}
 
-	engine.LogActivePositions(ctx)
+	engine.CleanupPendingOrders(ctx)
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Printf("[WARN] Failed to read screening JSON file %s: %v", filePath, err)
+		log.Printf("[WARN] screening file %s: %v", filePath, err)
 		return
 	}
 
 	var result models.ScreeningResult
 	if err := json.Unmarshal(data, &result); err != nil {
-		log.Printf("[ERROR] Failed to unmarshal screening payload: %v", err)
+		log.Printf("[ERROR] screening JSON: %v", err)
 		return
 	}
 
-	log.Printf("[ENGINE] Processing snapshot generated at %s. Candidates: %d",
+	log.Printf("[ENGINE] snapshot=%s candidates=%d",
 		result.GeneratedAt.Format(time.RFC3339), len(result.Candidates))
 
 	if concurrency <= 0 {
-		concurrency = 5
+		concurrency = 4
 	}
 
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	for _, cand := range result.Candidates {
-		if ctx.Err() != nil {
-			break
-		}
-
-		cand := cand
+	for _, candidate := range result.Candidates {
+		candidate := candidate
 		wg.Add(1)
 
-		go func(c models.Candidate) {
+		go func() {
 			defer wg.Done()
-
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
@@ -144,15 +154,14 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 			}
 			defer func() { <-sem }()
 
-			engine.UpdateTrailingStops(ctx, c.Symbol, c.Market.Price)
+			engine.UpdateTrailingStops(ctx, candidate.Symbol, candidate.Market.Price)
 
-			if err := engine.ProcessCandidate(ctx, c, targetStrategy); err != nil {
-				if ctx.Err() == nil {
-					log.Printf("[ERROR] Failed to process candidate %s: %v", c.Symbol, err)
-				}
+			if err := engine.ProcessCandidate(ctx, candidate, targetStrategy); err != nil && ctx.Err() == nil {
+				log.Printf("[WARN] candidate %s: %v", candidate.Symbol, err)
 			}
-		}(cand)
+		}()
 	}
 
 	wg.Wait()
+	engine.LogActivePositions(ctx)
 }

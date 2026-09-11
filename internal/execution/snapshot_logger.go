@@ -60,11 +60,15 @@ func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, or
 		BTC15mTrendPct:  btcTrendPct,
 	}
 
+	orderPart := orderID
+	if len(orderPart) > 8 {
+		orderPart = orderPart[:8]
+	}
 	fileName := fmt.Sprintf("%s_%s_%s_%s.json",
 		snap.Timestamp.Format("20060102_150405"),
 		symbol,
 		side,
-		orderID[:8],
+		orderPart,
 	)
 	filePath := filepath.Join(snapshotDir, fileName)
 

@@ -1,4 +1,3 @@
-// internal/execution/ws_engine.go
 package execution
 
 import (
@@ -26,15 +25,33 @@ type ExecutionLog struct {
 	ExecType   string    `json:"execType"`
 	ClosedSize float64   `json:"closedSize"`
 	ExecTime   time.Time `json:"execTime"`
+	ExecID     string    `json:"execId"`
+}
+
+type PositionUpdate struct {
+	Symbol     string
+	Side       string
+	Size       float64
+	EntryPrice float64
+}
+
+type OrderUpdate struct {
+	Symbol     string
+	OrderID    string
+	Side       string
+	Status     string
+	CumExecQty float64
 }
 
 type WSEngine struct {
-	apiKey          string
-	apiSecret       string
-	testnet         bool
-	onPosClosed     func(symbol string)
-	onBalanceUpdate func(balance float64)
-	onExecution     func(exec ExecutionLog)
+	apiKey    string
+	apiSecret string
+	testnet   bool
+
+	onPosition      func(PositionUpdate)
+	onOrder         func(OrderUpdate)
+	onExecution     func(ExecutionLog)
+	onBalanceUpdate func(float64)
 
 	publicConn  *websocket.Conn
 	privateConn *websocket.Conn
@@ -52,17 +69,19 @@ type WSEngine struct {
 func NewWSEngine(
 	apiKey, apiSecret string,
 	testnet bool,
-	onPosClosed func(string),
-	onBalanceUpdate func(float64),
+	onPosition func(PositionUpdate),
+	onOrder func(OrderUpdate),
 	onExecution func(ExecutionLog),
+	onBalanceUpdate func(float64),
 ) *WSEngine {
 	return &WSEngine{
 		apiKey:          apiKey,
 		apiSecret:       apiSecret,
 		testnet:         testnet,
-		onPosClosed:     onPosClosed,
-		onBalanceUpdate: onBalanceUpdate,
+		onPosition:      onPosition,
+		onOrder:         onOrder,
 		onExecution:     onExecution,
+		onBalanceUpdate: onBalanceUpdate,
 		prices:          make(map[string]float64),
 		subscribed:      make(map[string]bool),
 		lastBTCReset:    time.Now(),
@@ -72,21 +91,18 @@ func NewWSEngine(
 func (w *WSEngine) GetLatestPrice(symbol string) (float64, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	price, exists := w.prices[symbol]
-	return price, exists && price > 0
+	price, ok := w.prices[symbol]
+	return price, ok && price > 0
 }
 
 func (w *WSEngine) GetBTCTrend15m() (float64, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-
-	btcPrice, exists := w.prices["BTCUSDT"]
-	if !exists || btcPrice <= 0 || w.btcBase15mPrice <= 0 {
+	price, ok := w.prices["BTCUSDT"]
+	if !ok || price <= 0 || w.btcBase15mPrice <= 0 {
 		return 0, false
 	}
-
-	changePct := (btcPrice - w.btcBase15mPrice) / w.btcBase15mPrice * 100.0
-	return changePct, true
+	return (price - w.btcBase15mPrice) / w.btcBase15mPrice * 100, true
 }
 
 func (w *WSEngine) StartPublicTickerStream(ctx context.Context) error {
@@ -94,10 +110,9 @@ func (w *WSEngine) StartPublicTickerStream(ctx context.Context) error {
 	if w.testnet {
 		url = "wss://stream-testnet.bybit.com/v5/public/linear"
 	}
-
-	// Автоматически подписываемся на BTCUSDT для межрыночной фильтрации
-	_ = w.SubscribeTicker("BTCUSDT")
-
+	w.mu.Lock()
+	w.subscribed["BTCUSDT"] = true
+	w.mu.Unlock()
 	go w.connectAndReadPublic(ctx, url)
 	return nil
 }
@@ -110,57 +125,75 @@ func (w *WSEngine) connectAndReadPublic(ctx context.Context, url string) {
 		default:
 		}
 
-		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 		if err != nil {
-			log.Printf("[WS WARN] Public Dial error: %v. Retrying in 5s...", err)
-			time.Sleep(5 * time.Second)
+			log.Printf("[WS WARN] public dial: %v", err)
+			if !sleepContext(ctx, 5*time.Second) {
+				return
+			}
 			continue
 		}
 
 		w.pubConnMu.Lock()
 		w.publicConn = conn
+		w.resubscribeTickersLocked()
 		w.pubConnMu.Unlock()
 
-		w.resubscribeTickers()
-
-		pingCtx, pingCancel := context.WithCancel(ctx)
+		pingCtx, cancel := context.WithCancel(ctx)
 		go w.startHeartbeat(pingCtx, conn, &w.pubConnMu, "Public")
 
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("[WS WARN] Public Read error: %v. Reconnecting...", err)
-				pingCancel()
+				cancel()
 				_ = conn.Close()
 				break
 			}
-
-			var msg struct {
-				Topic string `json:"topic"`
-				Data  struct {
-					Symbol    string `json:"symbol"`
-					LastPrice string `json:"lastPrice"`
-				} `json:"data"`
-			}
-
-			if err := json.Unmarshal(message, &msg); err == nil && msg.Topic != "" {
-				if price, err := strconv.ParseFloat(msg.Data.LastPrice, 64); err == nil && price > 0 {
-					w.mu.Lock()
-					w.prices[msg.Data.Symbol] = price
-
-					if msg.Data.Symbol == "BTCUSDT" {
-						if w.btcBase15mPrice == 0 || time.Since(w.lastBTCReset) >= 15*time.Minute {
-							w.btcBase15mPrice = price
-							w.lastBTCReset = time.Now()
-						}
-					}
-					w.mu.Unlock()
-				}
-			}
+			w.parsePublicMessage(message)
 		}
-		pingCancel()
-		time.Sleep(2 * time.Second)
+		cancel()
+
+		w.pubConnMu.Lock()
+		if w.publicConn == conn {
+			w.publicConn = nil
+		}
+		w.pubConnMu.Unlock()
+
+		if !sleepContext(ctx, 2*time.Second) {
+			return
+		}
 	}
+}
+
+func (w *WSEngine) parsePublicMessage(message []byte) {
+	var msg struct {
+		Topic string          `json:"topic"`
+		Data  json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(message, &msg) != nil || msg.Topic == "" {
+		return
+	}
+
+	var data struct {
+		Symbol    string `json:"symbol"`
+		LastPrice string `json:"lastPrice"`
+	}
+	if json.Unmarshal(msg.Data, &data) != nil || data.Symbol == "" {
+		return
+	}
+	price, err := strconv.ParseFloat(data.LastPrice, 64)
+	if err != nil || price <= 0 {
+		return
+	}
+
+	w.mu.Lock()
+	w.prices[data.Symbol] = price
+	if data.Symbol == "BTCUSDT" &&
+		(w.btcBase15mPrice == 0 || time.Since(w.lastBTCReset) >= 15*time.Minute) {
+		w.btcBase15mPrice = price
+		w.lastBTCReset = time.Now()
+	}
+	w.mu.Unlock()
 }
 
 func (w *WSEngine) SubscribeTicker(symbol string) error {
@@ -174,39 +207,24 @@ func (w *WSEngine) SubscribeTicker(symbol string) error {
 
 	w.pubConnMu.Lock()
 	defer w.pubConnMu.Unlock()
-
 	if w.publicConn == nil {
 		return nil
 	}
-
-	req := map[string]interface{}{
+	return w.publicConn.WriteJSON(map[string]interface{}{
 		"op":   "subscribe",
 		"args": []string{fmt.Sprintf("tickers.%s", symbol)},
-	}
-	return w.publicConn.WriteJSON(req)
+	})
 }
 
-func (w *WSEngine) resubscribeTickers() {
+func (w *WSEngine) resubscribeTickersLocked() {
 	w.mu.RLock()
-	symbols := make([]string, 0, len(w.subscribed))
-	for s := range w.subscribed {
-		symbols = append(symbols, fmt.Sprintf("tickers.%s", s))
+	args := make([]string, 0, len(w.subscribed))
+	for symbol := range w.subscribed {
+		args = append(args, fmt.Sprintf("tickers.%s", symbol))
 	}
 	w.mu.RUnlock()
-
-	if len(symbols) == 0 {
-		return
-	}
-
-	w.pubConnMu.Lock()
-	defer w.pubConnMu.Unlock()
-
-	if w.publicConn != nil {
-		req := map[string]interface{}{
-			"op":   "subscribe",
-			"args": symbols,
-		}
-		_ = w.publicConn.WriteJSON(req)
+	if w.publicConn != nil && len(args) > 0 {
+		_ = w.publicConn.WriteJSON(map[string]interface{}{"op": "subscribe", "args": args})
 	}
 }
 
@@ -215,7 +233,6 @@ func (w *WSEngine) StartPrivateStream(ctx context.Context) error {
 	if w.testnet {
 		url = "wss://stream-testnet.bybit.com/v5/private"
 	}
-
 	go w.connectAndReadPrivate(ctx, url)
 	return nil
 }
@@ -228,80 +245,80 @@ func (w *WSEngine) connectAndReadPrivate(ctx context.Context, url string) {
 		default:
 		}
 
-		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 		if err != nil {
-			log.Printf("[WS WARN] Private Dial error: %v. Retrying in 5s...", err)
-			time.Sleep(5 * time.Second)
+			log.Printf("[WS WARN] private dial: %v", err)
+			if !sleepContext(ctx, 5*time.Second) {
+				return
+			}
 			continue
 		}
 
 		expires := time.Now().UnixMilli() + 10000
-		val := fmt.Sprintf("GET/realtime%d", expires)
+		message := fmt.Sprintf("GET/realtime%d", expires)
 		h := hmac.New(sha256.New, []byte(w.apiSecret))
-		h.Write([]byte(val))
-		sig := hex.EncodeToString(h.Sum(nil))
+		_, _ = h.Write([]byte(message))
+		signature := hex.EncodeToString(h.Sum(nil))
 
-		authReq := map[string]interface{}{
+		if err := conn.WriteJSON(map[string]interface{}{
 			"op":   "auth",
-			"args": []interface{}{w.apiKey, expires, sig},
-		}
-
-		if err := conn.WriteJSON(authReq); err != nil {
-			log.Printf("[WS ERROR] Private auth payload send failed: %v", err)
+			"args": []interface{}{w.apiKey, expires, signature},
+		}); err != nil {
 			_ = conn.Close()
-			time.Sleep(3 * time.Second)
+			if !sleepContext(ctx, 3*time.Second) {
+				return
+			}
 			continue
 		}
-		log.Printf("[WS INFO] Private auth request dispatched successfully.")
 
 		w.privConnMu.Lock()
 		w.privateConn = conn
 		w.privConnMu.Unlock()
 
-		subReq := map[string]interface{}{
+		if err := conn.WriteJSON(map[string]interface{}{
 			"op":   "subscribe",
-			"args": []string{"position", "wallet", "execution"},
-		}
-		if err := conn.WriteJSON(subReq); err != nil {
-			log.Printf("[WS ERROR] Private subscribe payload send failed: %v", err)
-		} else {
-			log.Printf("[WS INFO] Subscribed to private topics: [position, wallet, execution].")
+			"args": []string{"position", "wallet", "execution", "order"},
+		}); err != nil {
+			log.Printf("[WS WARN] private subscribe: %v", err)
 		}
 
-		pingCtx, pingCancel := context.WithCancel(ctx)
+		pingCtx, cancel := context.WithCancel(ctx)
 		go w.startHeartbeat(pingCtx, conn, &w.privConnMu, "Private")
 
 		for {
-			_, message, err := conn.ReadMessage()
+			_, raw, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("[WS WARN] Private Read error: %v. Reconnecting...", err)
-				pingCancel()
+				cancel()
 				_ = conn.Close()
 				break
 			}
-
-			w.parsePrivateMessage(message)
+			w.parsePrivateMessage(raw)
 		}
-		pingCancel()
-		time.Sleep(2 * time.Second)
+		cancel()
+
+		w.privConnMu.Lock()
+		if w.privateConn == conn {
+			w.privateConn = nil
+		}
+		w.privConnMu.Unlock()
+
+		if !sleepContext(ctx, 2*time.Second) {
+			return
+		}
 	}
 }
 
-func (w *WSEngine) startHeartbeat(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, connType string) {
+func (w *WSEngine) startHeartbeat(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, name string) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			mu.Lock()
-			if conn != nil {
-				pingReq := map[string]string{"op": "ping"}
-				if err := conn.WriteJSON(pingReq); err != nil {
-					log.Printf("[WS WARN] %s Ping failed: %v", connType, err)
-				}
+			if err := conn.WriteJSON(map[string]string{"op": "ping"}); err != nil {
+				log.Printf("[WS WARN] %s heartbeat: %v", name, err)
 			}
 			mu.Unlock()
 		}
@@ -313,55 +330,72 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 		Topic string          `json:"topic"`
 		Data  json.RawMessage `json:"data"`
 	}
-
-	if err := json.Unmarshal(message, &base); err != nil || base.Topic == "" {
+	if json.Unmarshal(message, &base) != nil || base.Topic == "" {
 		return
 	}
 
 	switch base.Topic {
 	case "position":
-		var posData []struct {
-			Symbol string `json:"symbol"`
-			Size   string `json:"size"`
+		var data []struct {
+			Symbol     string `json:"symbol"`
+			Side       string `json:"side"`
+			Size       string `json:"size"`
+			EntryPrice string `json:"entryPrice"`
 		}
-		if err := json.Unmarshal(base.Data, &posData); err == nil {
-			for _, pos := range posData {
-				if size, err := strconv.ParseFloat(pos.Size, 64); err == nil && size == 0 {
-					if w.onPosClosed != nil {
-						w.onPosClosed(pos.Symbol)
-					}
-				}
+		if json.Unmarshal(base.Data, &data) != nil {
+			return
+		}
+		for _, item := range data {
+			size, _ := strconv.ParseFloat(item.Size, 64)
+			entry, _ := strconv.ParseFloat(item.EntryPrice, 64)
+			if w.onPosition != nil {
+				w.onPosition(PositionUpdate{
+					Symbol:     item.Symbol,
+					Side:       item.Side,
+					Size:       size,
+					EntryPrice: entry,
+				})
 			}
 		}
 
 	case "wallet":
-		var walletData []struct {
-			Coin []struct {
-				Coin                string `json:"coin"`
-				AvailableToWithdraw string `json:"availableToWithdraw"`
-				WalletBalance       string `json:"walletBalance"`
-			} `json:"coin"`
+		var data []struct {
+			TotalAvailableBalance string `json:"totalAvailableBalance"`
 		}
-		if err := json.Unmarshal(base.Data, &walletData); err == nil {
-			for _, item := range walletData {
-				for _, coin := range item.Coin {
-					if coin.Coin == "USDT" {
-						balStr := coin.AvailableToWithdraw
-						if balStr == "" {
-							balStr = coin.WalletBalance
-						}
-						if bal, err := strconv.ParseFloat(balStr, 64); err == nil && bal >= 0 {
-							if w.onBalanceUpdate != nil {
-								w.onBalanceUpdate(bal)
-							}
-						}
-					}
+		if json.Unmarshal(base.Data, &data) == nil && len(data) > 0 {
+			if balance, err := strconv.ParseFloat(data[0].TotalAvailableBalance, 64); err == nil && balance >= 0 {
+				if w.onBalanceUpdate != nil {
+					w.onBalanceUpdate(balance)
 				}
 			}
 		}
 
+	case "order":
+		var data []struct {
+			Symbol      string `json:"symbol"`
+			OrderID     string `json:"orderId"`
+			Side        string `json:"side"`
+			OrderStatus string `json:"orderStatus"`
+			CumExecQty  string `json:"cumExecQty"`
+		}
+		if json.Unmarshal(base.Data, &data) != nil {
+			return
+		}
+		for _, item := range data {
+			qty, _ := strconv.ParseFloat(item.CumExecQty, 64)
+			if w.onOrder != nil {
+				w.onOrder(OrderUpdate{
+					Symbol:     item.Symbol,
+					OrderID:    item.OrderID,
+					Side:       item.Side,
+					Status:     item.OrderStatus,
+					CumExecQty: qty,
+				})
+			}
+		}
+
 	case "execution":
-		var execData []struct {
+		var data []struct {
 			Symbol     string `json:"symbol"`
 			Side       string `json:"side"`
 			ExecPrice  string `json:"execPrice"`
@@ -371,30 +405,42 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 			ExecType   string `json:"execType"`
 			ClosedSize string `json:"closedSize"`
 			ExecTime   string `json:"execTime"`
+			ExecID     string `json:"execId"`
 		}
-		if err := json.Unmarshal(base.Data, &execData); err == nil {
-			for _, exec := range execData {
-				closedSz, _ := strconv.ParseFloat(exec.ClosedSize, 64)
-				execQty, _ := strconv.ParseFloat(exec.ExecQty, 64)
-
-				if (closedSz > 0 || execQty > 0) && w.onExecution != nil {
-					price, _ := strconv.ParseFloat(exec.ExecPrice, 64)
-					fee, _ := strconv.ParseFloat(exec.ExecFee, 64)
-					tsMS, _ := strconv.ParseInt(exec.ExecTime, 10, 64)
-
-					w.onExecution(ExecutionLog{
-						Symbol:     exec.Symbol,
-						Side:       exec.Side,
-						ExecPrice:  price,
-						ExecQty:    execQty,
-						ExecFee:    fee,
-						OrderType:  exec.OrderType,
-						ExecType:   exec.ExecType,
-						ClosedSize: closedSz,
-						ExecTime:   time.UnixMilli(tsMS).UTC(),
-					})
-				}
+		if json.Unmarshal(base.Data, &data) != nil {
+			return
+		}
+		for _, item := range data {
+			price, _ := strconv.ParseFloat(item.ExecPrice, 64)
+			qty, _ := strconv.ParseFloat(item.ExecQty, 64)
+			fee, _ := strconv.ParseFloat(item.ExecFee, 64)
+			closed, _ := strconv.ParseFloat(item.ClosedSize, 64)
+			ms, _ := strconv.ParseInt(item.ExecTime, 10, 64)
+			if w.onExecution != nil && (qty > 0 || closed > 0) {
+				w.onExecution(ExecutionLog{
+					Symbol:     item.Symbol,
+					Side:       item.Side,
+					ExecPrice:  price,
+					ExecQty:    qty,
+					ExecFee:    fee,
+					OrderType:  item.OrderType,
+					ExecType:   item.ExecType,
+					ClosedSize: closed,
+					ExecTime:   time.UnixMilli(ms).UTC(),
+					ExecID:     item.ExecID,
+				})
 			}
 		}
+	}
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }

@@ -1,212 +1,273 @@
-```bash
-go build -o screener ./cmd/screener
+# Universal Bybit Screener / Bot
+
+## Что это
+
+Проект состоит из двух исполняемых частей:
+
+- `screener` — исследовательский/сигнальный скриннер USDT Linear Perpetual на Bybit;
+- `bot` — исполнитель, который читает JSON скриннера и может выставлять реальные PostOnly-заявки на Bybit.
+
+Скриннер не открывает позиции. Бот не рассчитывает рынок заново — он использует screening snapshot, но перед заявкой повторно проверяет актуальные bid/ask, instrument limits и ограничения риска.
+
+## Стратегии скриннера
+
+Доступны:
+
+- `long`
+- `short`
+- `long-grid`
+- `short-grid`
+- `neutral-grid`
+
+`long-grid`, `short-grid` и `neutral-grid` в этой версии являются **только screening strategies**. Торговый бот намеренно принимает только `long` и `short`, чтобы не превратить score grid-стратегии в ошибочную directional торговлю.
+
+## Основные исправления
+
+В исправленной версии устранены критические проблемы исходника:
+
+- PostOnly теперь выставляется на maker-стороне spread: Buy по bid, Sell по ask;
+- pending order не считается открытой позицией до фактического fill;
+- добавлена синхронизация позиций и заявок после рестарта;
+- добавлен order lifecycle через private WebSocket;
+- зависшие pending orders автоматически отменяются;
+- контролируется `MaxTotalMarginUSD`;
+- используется `totalAvailableBalance` Unified Account вместо устаревшего `availableToWithdraw`;
+- удалён вызов устаревшего `switch-isolated` из торгового пути;
+- SL/TP проходят pre-trade проверку;
+- SL/TP передаются уже при создании заявки;
+- исправлен опасный fallback SL при отсутствии pivot;
+- добавлен fee/cost safety check;
+- анализируются закрытые свечи;
+- исправлен off-by-one в VolumeRatio;
+- новые символы Top-N автоматически добавляются в WebSocket universe;
+- проверяется свежесть order book;
+- neutral-grid существенно ужесточён;
+- добавлены unit-тесты критической risk/strategy логики.
+
+Подробности: `AUDIT.md`.
+
+Подробное описание каждого файла и каждой функции: `STRUCTURE.md`.
+
+## Требования
+
+- Go 1.26.5
+- Bybit V5 API
+- API key/secret с разрешениями, необходимыми для торговли, если запускается `bot`
+
+## Переменные окружения
+
+Создайте `.env`:
+
+```env
+BYBIT_API_KEY=...
+BYBIT_API_SECRET=...
 ```
 
+Не добавляйте `.env` в Git.
+
+## Сборка
+
+Собрать оба бинарника:
+
 ```bash
-go build -o bot ./cmd/bot 
+make build
 ```
 
-```bash
-./screener --strategy long --interval 1m --config configs/config.json
-```
+Отдельно:
 
 ```bash
-./screener --strategy short --interval 1m --config configs/config.json
-```
-
-```bash
-./bot --strategy long --input long-screening.json --config configs/config.json
-```
-
-```bash
-./bot --strategy short --input short-screening.json --config configs/config.json
-```
-
-# Чек-лист и шпаргалка по управлению инфраструктурой через SSH
-
-## 1. Сборка (Компиляция) из исходников
-
-Выполняется из рабочей директории `/opt/trading-bot` при внесении изменений в код.
-
-```bash
-cd /opt/trading-bot
-
-# Подтянуть изменения из репозитория
-git pull
-
-# Сборка бинарника скринера
-go build -ldflags="-s -w" -o screener ./cmd/screener
-
-# Сборка бинарника исполняющего движка
 go build -ldflags="-s -w" -o bot ./cmd/bot
+go build -ldflags="-s -w" -o screener ./cmd/screener
 ```
 
-## 2. Управление Торговыми Ботами (bot-long и bot-short)
-Перепрочесть настройки автоматики
-```bash
-systemctl daemon-reload
-```
-
-Проверка статуса
+Проверка:
 
 ```bash
-# Статус обоих ботов
-systemctl status bot-long bot-short
-
-# Статус только Long-бота
-systemctl status bot-long
-
-# Статус только Short-бота
-systemctl status bot-short
+go test ./...
+go vet ./...
 ```
 
-Запуск
+## Запуск скриннера
+
+Long:
+
 ```bash
-# Запуск обоих ботов
-systemctl start bot-long bot-short
-
-# Запуск только Long / Short
-systemctl start bot-long
-systemctl start bot-short
+./screener -strategy long
 ```
 
-Остановка
+Short:
+
 ```bash
-# Остановка обоих ботов
-systemctl stop bot-long bot-short
-
-# Остановка только Long / Short
-systemctl stop bot-long
-systemctl stop bot-short
+./screener -strategy short
 ```
 
-Перезапуск
+Long grid:
+
 ```bash
-# Перезапуск обоих ботов
-systemctl restart bot-long bot-short
-
-# Перезапуск конкретного бота
-systemctl restart bot-long
-systemctl restart bot-short
+./screener -strategy long-grid
 ```
 
-## 3. Управление Скринерами (screener-long и screener-short)
-Проверка статуса
+Short grid:
+
 ```bash
-systemctl status screener-long screener-short
+./screener -strategy short-grid
 ```
 
-Запуск
+Neutral grid:
+
 ```bash
-systemctl start screener-long screener-short
+./screener -strategy neutral-grid
 ```
 
-Остановка
+Изменить интервал:
+
 ```bash
-systemctl stop screener-long screener-short
+./screener -strategy long -interval 5m
 ```
 
-Перезапуск
+Использовать другой конфиг:
+
 ```bash
-systemctl restart screener-long screener-short
+./screener -strategy long -config configs/config.json
 ```
 
-## 4. Массовое управление всей экосистемой (Скринеры + Боты)
-Полный перезапуск (после компиляции)
+Результат для `long`:
+
+```text
+long-screening.json
+```
+
+Для остальных стратегий имя строится как:
+
+```text
+<strategy>-screening.json
+```
+
+## Запуск бота
+
+Перед реальной торговлей рекомендуется использовать Testnet.
+
+Long:
+
 ```bash
-systemctl restart screener-long screener-short bot-long bot-short
+./bot -strategy long -input long-screening.json
 ```
 
-Полная остановка
+Short:
+
 ```bash
-systemctl stop screener-long screener-short bot-long bot-short
+./bot -strategy short -input short-screening.json
 ```
 
-Полный запуск
+Другой конфиг:
+
 ```bash
-systemctl start screener-long screener-short bot-long bot-short
+./bot \
+  -strategy long \
+  -config configs/config.json \
+  -input long-screening.json
 ```
 
-Статус всей системы в один экран
+Бот намеренно завершится с ошибкой при попытке:
+
 ```bash
-systemctl status screener-long screener-short bot-long bot-short
+./bot -strategy neutral-grid
 ```
 
-## 5. Просмотр и Мониторинг Логов
-В реальном времени (live-tail через log-файлы)
+или:
+
 ```bash
-# Логи Long-бота
-tail -f /opt/trading-bot/logs/long-bot.log
-
-# Логи Short-бота
-tail -f /opt/trading-bot/logs/short-bot.log
-
-# Логи Long-скринера
-tail -f /opt/trading-bot/logs/screener-long.log
-
-# Логи Short-скринера
-tail -f /opt/trading-bot/logs/screener-short.log
-
-# Логи ошибок (Error logs)
-tail -f /opt/trading-bot/logs/short-bot-error.log
-tail -f /opt/trading-bot/logs/long-bot-error.log
+./bot -strategy long-grid
 ```
 
-Посмотреть последние 100 строк лога
-```bash
-tail -n 100 /opt/trading-bot/logs/short-bot.log
-tail -n 100 /opt/trading-bot/logs/long-bot.log
+Это сделано специально: grid screening и grid execution — разные вещи.
+
+## Конфигурация риска
+
+В `configs/config.json`:
+
+```json
+"execution": {
+  "testnet": false,
+  "max_leverage": 2,
+  "margin_per_trade_usd": 3.0,
+  "max_total_margin_usd": 12.0,
+  "max_active_positions": 3,
+  "min_score": 70.0,
+  "trailing_pct": 1.0,
+  "pending_order_timeout": "5m",
+  "maker_fee_rate": 0.0002,
+  "taker_fee_rate": 0.00055,
+  "extra_cost_pct": 0.02,
+  "max_stop_loss_pct": 5.0,
+  "min_net_profit_pct": 0.5
+}
 ```
 
+`maker_fee_rate` и `taker_fee_rate` здесь являются консервативными настройками для расчёта защитного запаса, а не утверждением о конкретной комиссии вашего аккаунта.
 
-## 6. Типовой Workflow применения доработок (One-liner)
-Если внесены правки в код, команда полных пересборки и перезапуска в одну строку:
-```bash
-cd /opt/trading-bot && git pull && go build -ldflags="-s -w" -o screener ./cmd/screener && go build -ldflags="-s -w" -o bot ./cmd/bot && systemctl restart screener-long screener-short bot-long bot-short
+## Что делает бот перед заявкой
+
+1. Проверяет score.
+2. Проверяет отсутствие уже открытой позиции по символу.
+3. Проверяет cooldown.
+4. Проверяет количество активных/pending позиций.
+5. Проверяет общий лимит маржи.
+6. Проверяет доступный баланс.
+7. Получает свежий bid/ask.
+8. Получает актуальные tick/qty/min-notional/max-qty ограничения.
+9. Рассчитывает размер позиции.
+10. Проверяет SL.
+11. Проверяет TP после оценочных комиссий.
+12. Устанавливает leverage.
+13. Выставляет PostOnly limit order.
+14. Передаёт SL/TP вместе с заявкой.
+15. Далее состояние позиции синхронизируется по private WebSocket.
+
+## Архитектура
+
+```text
+cmd/screener
+      |
+      v
+internal/analysis
+      |
+      +--> internal/bybit
+      +--> internal/indicators
+      +--> internal/structure
+      +--> internal/strategies
+      |
+      v
+<strategy>-screening.json
+      |
+      v
+cmd/bot
+      |
+      v
+internal/execution
+      |
+      +--> public/private WebSocket
+      +--> Bybit REST
+      |
+      v
+Bybit
 ```
 
-Посмотреть всякие логи
-```bash
-# 1. Логи закрытых сделок и Time-Stop за последние 4 часа
-journalctl -u bot-long -u bot-short --since "4 hours ago" -o cat | grep -E "\[TRADE CLOSED|TIME-STOP|\[SUCCESS\]"
+## Важное предупреждение
 
-# 2. Текущая сводка по слотам и балансу
-journalctl -u bot-long -u bot-short -n 4 -o cat | grep "SUMMARY"
-```
+Это не доказательство того, что стратегия прибыльна.
 
-Уведомления у выходах из позиции
-```bash
-journalctl -u bot-long -u bot-short -n 200 -o cat | grep -E "\[TRADE CLOSED|REST RESTORE\]"
-```
+Исправление программных ошибок не означает наличие положительного математического ожидания. Score, RSI, OI, funding, pivot levels и order-book imbalance сами по себе не доказывают, что сделка имеет edge.
 
-### Снова логи по торговле
-Выгрузка всех сделок и событий (SL, TP, Time-Stop)
-Основной дамп торговых событий за последние 6 часов (открытия, закрытия, причины выходов):
-```bash
-journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[SUCCESS\]|\[TRADE CLOSED|TIME-STOP|\[POS MONITOR\]"
-```
+Перед mainnet необходимо прогнать систему на Testnet и отдельно проверить:
 
-Сводка по балансу, активным слотам и uPnL
-Проверка текущего состояния депо и загрузки слотов $2/2$:
-```bash
-journalctl -u bot-long -u bot-short -n 10 -o cat | grep "SUMMARY"
-```
-
-Проверка скрытых ошибок API и проскальзываний
-Дамп сетевых отвалов, ошибок гидратации лота/нотионала и отвергнутых ордеров:
-```bash
-journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[ERROR\]|\[WARN\]|rejected|failed"
-```
-
-Комплексный пайплайн (Всё в один клик)
-Если хочешь снять полную картину одним запуском:
-```bash
-echo "=== SUMMARY ===" && journalctl -u bot-long -u bot-short -n 4 -o cat | grep "SUMMARY" && \
-echo -e "\n=== TRADES & STOPS (LAST 6H) ===" && journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[SUCCESS\]|\[TRADE CLOSED|TIME-STOP" && \
-echo -e "\n=== ERRORS ===" && journalctl -u bot-long -u bot-short --since "6 hours ago" -o cat | grep -E "\[ERROR\]|rejected"
-```
-
-## Deploy
-```bash
-deploy
-```
+- partial fills;
+- отмену PostOnly;
+- TP/SL после partial fill;
+- WebSocket reconnect;
+- restart/reconciliation;
+- rate limits;
+- реальные комиссии;
+- минимальные размеры заявок;
+- поведение при отсутствии liquidity;
+- поведение при резком движении рынка.

@@ -63,7 +63,7 @@ func (kc *KlineCache) UpdateWS(symbol, interval string, candle models.Candle) {
 	if arr[lastIdx].Time.Equal(candle.Time) {
 		arr[lastIdx] = candle
 	} else if candle.Time.After(arr[lastIdx].Time) {
-		if len(arr) >= 300 {
+		if len(arr) >= 1000 {
 			arr = append(arr[1:], candle)
 		} else {
 			arr = append(arr, candle)

@@ -12,50 +12,57 @@ func (NeutralGrid) Evaluate(c *models.Candidate) models.StrategyResult {
 	st1 := c.Structure["1h"]
 	st4 := c.Structure["4h"]
 
-	// Hard Gate: Восходящий/падающий тренд на 1h и 4h
-	if (st1.HighState == "HH" && st1.LowState == "HL" && st4.HighState == "HH") ||
-		(st1.HighState == "LH" && st1.LowState == "LL" && st4.HighState == "LH") {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "strong trend detected on 1h/4h"}
+	isUpTrend := func(st models.Structure) bool {
+		return st.HighState == "HH" && st.LowState == "HL"
+	}
+	isDownTrend := func(st models.Structure) bool {
+		return st.HighState == "LH" && st.LowState == "LL"
 	}
 
-	// Hard Gate: Расширяющийся клин (HH + LL) — критический риск Impermanent Loss
+	if isUpTrend(st1) || isDownTrend(st1) || isUpTrend(st4) || isDownTrend(st4) {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "directional trend detected on 1h/4h"}
+	}
+
 	if st1.HighState == "HH" && st1.LowState == "LL" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "broadening formation (HH+LL) detected - high risk of IL"}
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "broadening formation (HH+LL)"}
+	}
+	if st1.HighState == "LH" && st1.LowState == "HL" {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "contracting formation (LH+HL)"}
 	}
 
-	// Hard Gate: Отсутствие сформированного канала
 	if c.Levels.NearestResistance == 0 || c.Levels.NearestSupport == 0 {
 		return models.StrategyResult{Score: 0, Status: "reject", Reason: "no complete support/resistance range"}
 	}
-
-	// Hard Gate: Недостаточный диапазон относительно ATR (риск мгновенного выбивания сетки)
-	if c.Levels.RangeToATR1h < 1.5 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "range width insufficient against 1h volatility"}
+	if c.Indicators.ATR1hPct <= 0 || c.Indicators.ATR1hPct > 3.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h volatility too high for neutral grid"}
+	}
+	if c.Levels.RangeToATR1h < 2.0 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "range too narrow versus 1h ATR"}
+	}
+	if c.Levels.RangeWidthPct < 3 || c.Levels.RangeWidthPct > 15 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "range width outside neutral-grid limits"}
+	}
+	if c.Levels.RangePositionPct < 25 || c.Levels.RangePositionPct > 75 {
+		return models.StrategyResult{Score: 0, Status: "reject", Reason: "price too close to range edge"}
 	}
 
 	score := 50.0
-
-	// Положение цены ближе к центру канала — идеальная точка старта
-	if c.Levels.RangePositionPct >= 35 && c.Levels.RangePositionPct <= 65 {
+	if c.Levels.RangePositionPct >= 40 && c.Levels.RangePositionPct <= 60 {
 		score += 25
-	} else if c.Levels.RangePositionPct < 20 || c.Levels.RangePositionPct > 80 {
-		score -= 20
+	} else {
+		score += 10
 	}
-
-	// Коридор 3% - 15% оптимален для забора сеточной сетки
-	if c.Levels.RangeWidthPct >= 3 && c.Levels.RangeWidthPct <= 15 {
+	if c.Indicators.RSI1h >= 40 && c.Indicators.RSI1h <= 60 {
 		score += 15
 	}
-
-	if c.Indicators.RSI1h >= 40 && c.Indicators.RSI1h <= 60 {
+	if c.Indicators.VolumeTrend1h <= 10 {
 		score += 10
 	}
 
 	score = clamp(score)
-
 	return models.StrategyResult{
 		Score:  score,
 		Status: status(score),
-		Reason: "stable range with multi-TF volatility protection",
+		Reason: "low-volatility range with trend and edge protection",
 	}
 }

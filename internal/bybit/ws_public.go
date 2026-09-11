@@ -16,30 +16,61 @@ import (
 const defaultWsURL = "wss://stream.bybit.com/v5/public/linear"
 
 type PublicWSStream struct {
-	obCache    *OrderBookCache
-	klineCache *KlineCache
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	subTopics  map[string]bool
-	isCtxDone  bool
+	obCache        *OrderBookCache
+	klineCache     *KlineCache
+	conn           *websocket.Conn
+	mu             sync.Mutex
+	subTopics      map[string]bool
+	isCtxDone      bool
+	started        bool
+	orderBookDepth int
 }
 
-func NewPublicWSStream(ob *OrderBookCache, kc *KlineCache) *PublicWSStream {
+func NewPublicWSStream(ob *OrderBookCache, kc *KlineCache, orderBookDepth int) *PublicWSStream {
+	if orderBookDepth != 50 && orderBookDepth != 200 && orderBookDepth != 1000 {
+		orderBookDepth = 50
+	}
 	return &PublicWSStream{
-		obCache:    ob,
-		klineCache: kc,
-		subTopics:  make(map[string]bool),
+		obCache:        ob,
+		klineCache:     kc,
+		subTopics:      make(map[string]bool),
+		orderBookDepth: orderBookDepth,
+	}
+}
+
+func (ws *PublicWSStream) topicsForSymbol(symbol string) []string {
+	return []string{
+		fmt.Sprintf("orderbook.%d.%s", ws.orderBookDepth, symbol),
+		fmt.Sprintf("kline.5.%s", symbol),
+		fmt.Sprintf("kline.15.%s", symbol),
+		fmt.Sprintf("kline.30.%s", symbol),
+		fmt.Sprintf("kline.60.%s", symbol),
+		fmt.Sprintf("kline.240.%s", symbol),
+	}
+}
+
+func (ws *PublicWSStream) AddSymbols(symbols []string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	for _, symbol := range symbols {
+		for _, topic := range ws.topicsForSymbol(symbol) {
+			ws.subTopics[topic] = true
+		}
+	}
+	if ws.conn != nil {
+		ws.subscribeAllLocked()
 	}
 }
 
 func (ws *PublicWSStream) Start(ctx context.Context, symbols []string) error {
+	ws.AddSymbols(symbols)
+
 	ws.mu.Lock()
-	for _, s := range symbols {
-		ws.subTopics[fmt.Sprintf("orderbook.50.%s", s)] = true
-		ws.subTopics[fmt.Sprintf("kline.15.%s", s)] = true
-		ws.subTopics[fmt.Sprintf("kline.60.%s", s)] = true
-		ws.subTopics[fmt.Sprintf("kline.240.%s", s)] = true
+	if ws.started {
+		ws.mu.Unlock()
+		return nil
 	}
+	ws.started = true
 	ws.mu.Unlock()
 
 	go ws.loop(ctx)
@@ -63,16 +94,18 @@ func (ws *PublicWSStream) loop(ctx context.Context) {
 		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 		conn, _, err := dialer.DialContext(ctx, defaultWsURL, http.Header{})
 		if err != nil {
-			log.Printf("[WS WARN] Public Stream dial error: %v. Retrying in 5s...", err)
-			time.Sleep(5 * time.Second)
+			log.Printf("[WS WARN] Public stream dial error: %v. Retrying in 5s...", err)
+			if !sleepContext(ctx, 5*time.Second) {
+				return
+			}
 			continue
 		}
 
 		ws.mu.Lock()
 		ws.conn = conn
+		ws.isCtxDone = false
+		ws.subscribeAllLocked()
 		ws.mu.Unlock()
-
-		ws.subscribeAll()
 
 		pingCtx, pingCancel := context.WithCancel(ctx)
 		go ws.keepAlive(pingCtx, conn)
@@ -83,46 +116,62 @@ func (ws *PublicWSStream) loop(ctx context.Context) {
 				pingCancel()
 				ws.mu.Lock()
 				if !ws.isCtxDone {
-					log.Printf("[WS WARN] Public Stream disconnect: %v. Reconnecting...", err)
+					log.Printf("[WS WARN] Public stream disconnect: %v. Reconnecting...", err)
 				}
 				ws.mu.Unlock()
 				_ = conn.Close()
 				break
 			}
-
 			ws.parseMessage(msgBytes)
 		}
 
 		pingCancel()
-		time.Sleep(2 * time.Second)
+		ws.mu.Lock()
+		if ws.conn == conn {
+			ws.conn = nil
+		}
+		ws.mu.Unlock()
+
+		if !sleepContext(ctx, 2*time.Second) {
+			return
+		}
 	}
 }
 
-func (ws *PublicWSStream) subscribeAll() {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 
+func (ws *PublicWSStream) subscribeAllLocked() {
 	if ws.conn == nil || len(ws.subTopics) == 0 {
 		return
 	}
 
 	topics := make([]string, 0, len(ws.subTopics))
-	for t := range ws.subTopics {
-		topics = append(topics, t)
+	for topic := range ws.subTopics {
+		topics = append(topics, topic)
 	}
 
-	batchSize := 100
+	const batchSize = 50
 	for i := 0; i < len(topics); i += batchSize {
 		end := i + batchSize
 		if end > len(topics) {
 			end = len(topics)
 		}
-
-		subMsg := map[string]interface{}{
+		msg := map[string]interface{}{
 			"op":   "subscribe",
 			"args": topics[i:end],
 		}
-		_ = ws.conn.WriteJSON(subMsg)
+		if err := ws.conn.WriteJSON(msg); err != nil {
+			log.Printf("[WS WARN] subscription failed: %v", err)
+		}
 	}
 }
 
@@ -136,8 +185,8 @@ func (ws *PublicWSStream) keepAlive(ctx context.Context, conn *websocket.Conn) {
 			return
 		case <-ticker.C:
 			ws.mu.Lock()
-			if conn != nil {
-				_ = ws.conn.WriteJSON(map[string]string{"op": "ping"})
+			if ws.conn == conn {
+				_ = conn.WriteJSON(map[string]string{"op": "ping"})
 			}
 			ws.mu.Unlock()
 		}
@@ -150,26 +199,29 @@ func (ws *PublicWSStream) parseMessage(msgBytes []byte) {
 		Type  string          `json:"type"`
 		Data  json.RawMessage `json:"data"`
 	}
-
 	if err := json.Unmarshal(msgBytes, &base); err != nil || base.Topic == "" {
 		return
 	}
 
 	if strings.HasPrefix(base.Topic, "orderbook.") {
 		parts := strings.Split(base.Topic, ".")
-		if len(parts) == 3 {
-			var obData struct {
-				B [][]string `json:"b"`
-				A [][]string `json:"a"`
-			}
-			if err := json.Unmarshal(base.Data, &obData); err == nil {
-				ws.obCache.Update(parts[2], base.Type == "snapshot", obData.B, obData.A)
-			}
+		if len(parts) != 3 {
+			return
 		}
-	} else if strings.HasPrefix(base.Topic, "kline.") {
-		var klineData []map[string]interface{}
-		if err := json.Unmarshal(base.Data, &klineData); err == nil {
-			if candle, symbol, interval, ok := ParseWSKline(klineData); ok {
+		var data struct {
+			B [][]string `json:"b"`
+			A [][]string `json:"a"`
+		}
+		if err := json.Unmarshal(base.Data, &data); err == nil {
+			ws.obCache.Update(parts[2], base.Type == "snapshot", data.B, data.A)
+		}
+		return
+	}
+
+	if strings.HasPrefix(base.Topic, "kline.") {
+		var data []map[string]interface{}
+		if err := json.Unmarshal(base.Data, &data); err == nil {
+			if candle, symbol, interval, ok := ParseWSKline(data); ok {
 				ws.klineCache.UpdateWS(symbol, interval, candle)
 			}
 		}

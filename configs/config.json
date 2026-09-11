@@ -17,7 +17,8 @@
     "kline_limit_4h": 300,
     "open_interest_limit": 24,
     "funding_limit": 20,
-    "order_book_limit": 100
+    "order_book_limit": 50,
+    "max_data_age_seconds": 30
   },
   "execution": {
     "testnet": false,
@@ -27,7 +28,11 @@
     "max_active_positions": 3,
     "min_score": 70.0,
     "trailing_pct": 1.0,
-    "check_interval": "1m"
+    "check_interval": "1m",
+    "pending_order_timeout": "5m",
+    "maker_fee_rate": 0.0002,
+    "taker_fee_rate": 0.00055,
+    "extra_cost_pct": 0.02
   },
   "concurrency": 8,
   "http_timeout": "10s",
