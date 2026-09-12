@@ -38,7 +38,6 @@ type Config struct {
 		MarginPerTradeUSD   float64 `json:"margin_per_trade_usd"`
 		MaxTotalMarginUSD   float64 `json:"max_total_margin_usd"`
 		MaxActivePositions  int     `json:"max_active_positions"`
-		MinScore            float64 `json:"min_score"`
 		TrailingPct         float64 `json:"trailing_pct"`
 		CheckInterval       string  `json:"check_interval"`
 		PendingOrderTimeout string  `json:"pending_order_timeout"`
@@ -47,6 +46,7 @@ type Config struct {
 		ExtraCostPct        float64 `json:"extra_cost_pct"`
 		MaxStopLossPct      float64 `json:"max_stop_loss_pct"`
 		MinNetProfitPct     float64 `json:"min_net_profit_pct"`
+		MaxScreeningAge     string  `json:"max_screening_age"`
 	} `json:"execution"`
 
 	Concurrency int           `json:"concurrency"`
@@ -91,7 +91,6 @@ type rawConfig struct {
 		MarginPerTradeUSD   float64 `json:"margin_per_trade_usd"`
 		MaxTotalMarginUSD   float64 `json:"max_total_margin_usd"`
 		MaxActivePositions  int     `json:"max_active_positions"`
-		MinScore            float64 `json:"min_score"`
 		TrailingPct         float64 `json:"trailing_pct"`
 		CheckInterval       string  `json:"check_interval"`
 		PendingOrderTimeout string  `json:"pending_order_timeout"`
@@ -100,6 +99,7 @@ type rawConfig struct {
 		ExtraCostPct        float64 `json:"extra_cost_pct"`
 		MaxStopLossPct      float64 `json:"max_stop_loss_pct"`
 		MinNetProfitPct     float64 `json:"min_net_profit_pct"`
+		MaxScreeningAge     string  `json:"max_screening_age"`
 	} `json:"execution"`
 
 	Concurrency int    `json:"concurrency"`

@@ -203,12 +203,10 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 		return
 	}
 
-	riskAttachInProgress := pos.RiskAttachInProgress
-	if !hasCandidate || riskAttachInProgress {
+	if !hasCandidate {
 		e.mu.Unlock()
 		return
 	}
-	pos.RiskAttachInProgress = true
 
 	orderID := exec.OrderID
 	if orderID == "" {
@@ -248,52 +246,16 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 		}
 	}
 
-	go e.attachRiskAfterFill(exec.Symbol, exec.ExecPrice, exec.Side, candidate)
+	if !posRiskAttached(e, exec.Symbol) {
+		log.Printf("[CRITICAL] %s execution received but local risk state is not attached", exec.Symbol)
+	}
 }
 
-func (e *Engine) attachRiskAfterFill(symbol string, execPrice float64, side string, candidate models.Candidate) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	clearInProgress := func() {
-		e.mu.Lock()
-		if pos, ok := e.positions[symbol]; ok {
-			pos.RiskAttachInProgress = false
-		}
-		e.mu.Unlock()
-	}
-
-	_, _, tickSize, _, _, err := e.getInstrumentLimits(ctx, symbol)
-	if err != nil || tickSize <= 0 {
-		clearInProgress()
-		log.Printf("[ERROR] cannot attach risk for %s: instrument limits unavailable: %v", symbol, err)
-		return
-	}
-
-	sl, tp, costPct, err := e.calculateRiskLevels(side, execPrice, candidate, tickSize)
-	if err != nil {
-		clearInProgress()
-		log.Printf("[ERROR] refusing risk levels for %s: %v", symbol, err)
-		return
-	}
-
-	if err := e.SetTradingStopMarkPrice(ctx, symbol, side, sl, tp, tickSize); err != nil {
-		clearInProgress()
-		log.Printf("[ERROR] failed to attach SL/TP for %s: %v", symbol, err)
-		return
-	}
-
+func posRiskAttached(e *Engine, symbol string) bool {
 	e.mu.Lock()
-	if pos, ok := e.positions[symbol]; ok {
-		pos.StopLoss = sl
-		pos.TakeProfit = tp
-		pos.RiskAttached = true
-		pos.RiskAttachInProgress = false
-	}
-	e.mu.Unlock()
-
-	log.Printf("[RISK ATTACHED] %s %s entry=%.8f SL=%.8f TP=%.8f cost~%.3f%%",
-		symbol, side, execPrice, sl, tp, costPct)
+	defer e.mu.Unlock()
+	pos, ok := e.positions[symbol]
+	return ok && pos.RiskAttached
 }
 
 func (e *Engine) calculateRiskLevels(side string, entryPrice float64, candidate models.Candidate, tickSize float64) (float64, float64, float64, error) {
@@ -313,7 +275,7 @@ func (e *Engine) calculateRiskLevels(side string, entryPrice float64, candidate 
 	}
 
 	costPct := EstimatedRoundTripCostPct(e.cfg.MakerFeeRate, e.cfg.TakerFeeRate, e.cfg.ExtraCostPct)
-	netProfitPct := mathAbsPct(tp-entryPrice, entryPrice) - costPct
+	netProfitPct := mathAbsPct(math.Abs(tp-entryPrice), entryPrice) - costPct
 	if !ValidateTakeProfit(side, entryPrice, tp, e.cfg.MinNetProfitPct+costPct) || netProfitPct < e.cfg.MinNetProfitPct {
 		return 0, 0, 0, fmt.Errorf("take profit net distance %.4f%% is below minimum %.4f%% after estimated costs", netProfitPct, e.cfg.MinNetProfitPct)
 	}
@@ -360,6 +322,10 @@ func (e *Engine) RefreshBalance(ctx context.Context) error {
 	return nil
 }
 
+func (e *Engine) MaxScreeningAge() time.Duration {
+	return e.cfg.MaxScreeningAge
+}
+
 func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidate, targetStrategy string) error {
 	side := "Sell"
 	if strings.EqualFold(targetStrategy, "long") || strings.EqualFold(targetStrategy, "long-grid") {
@@ -371,7 +337,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 	}
 
 	result, ok := candidate.Strategies[targetStrategy]
-	if !ok || result.Status == "reject" || result.Score < e.cfg.MinScore {
+	if !ok || !result.Decision.Eligible {
 		return nil
 	}
 
@@ -497,7 +463,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 		pos.OrderID = orderID
 		pos.StopLoss = sl
 		pos.TakeProfit = tp
-		pos.RiskAttached = false
+		pos.RiskAttached = true
 		if pos.Size <= 0 {
 			pos.Pending = true
 		}

@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"math"
 	"testing"
 
 	"universal-bybit-screener/models"
@@ -53,7 +54,7 @@ func TestRiskValidation(t *testing.T) {
 func TestCalculateDynamicLeverage(t *testing.T) {
 	candidate := models.Candidate{
 		Strategies: map[string]models.StrategyResult{
-			"long": {Score: 80},
+			"long": {Decision: models.StrategyDecision{Eligible: true}},
 		},
 	}
 	candidate.Indicators.ATR1hPct = 4
@@ -92,5 +93,38 @@ func TestBuildPostOnlyOrderParams(t *testing.T) {
 	}
 	if params["tpOrderType"] != "Market" || params["slOrderType"] != "Market" {
 		t.Fatal("Full TP/SL must use Market trigger orders")
+	}
+}
+
+func TestShortTakeProfitDistanceIsPositive(t *testing.T) {
+	tp := CalculateDynamicTakeProfit("Sell", 100, 105, 2, 0.01)
+	if tp >= 100 {
+		t.Fatalf("expected short TP below entry, got %.2f", tp)
+	}
+	distance := math.Abs(tp-100) / 100 * 100
+	if distance <= 0 {
+		t.Fatalf("expected positive TP distance, got %.4f%%", distance)
+	}
+}
+
+func TestCalculateRiskLevelsForShort(t *testing.T) {
+	engine := &Engine{cfg: models.BotConfig{
+		MakerFeeRate:    0.0002,
+		TakerFeeRate:    0.00055,
+		ExtraCostPct:    0.02,
+		MaxStopLossPct:  5,
+		MinNetProfitPct: 0.5,
+	}}
+	candidate := models.Candidate{}
+	candidate.Indicators.ATR1h = 1
+	candidate.Indicators.ATR1hPct = 1
+	candidate.Levels.NearestResistance = 102
+
+	sl, tp, _, err := engine.calculateRiskLevels("Sell", 100, candidate, 0.01)
+	if err != nil {
+		t.Fatalf("short risk levels should pass: %v", err)
+	}
+	if sl <= 100 || tp >= 100 {
+		t.Fatalf("invalid short levels: SL=%.2f TP=%.2f", sl, tp)
 	}
 }

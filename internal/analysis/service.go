@@ -142,8 +142,15 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	}
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Strategies[s.strategy.Name()].Score >
-			results[j].Strategies[s.strategy.Name()].Score
+		left := results[i].Strategies[s.strategy.Name()]
+		right := results[j].Strategies[s.strategy.Name()]
+		if left.Decision.Eligible != right.Decision.Eligible {
+			return left.Decision.Eligible
+		}
+		if left.Scores.EntryQuality.Score != right.Scores.EntryQuality.Score {
+			return left.Scores.EntryQuality.Score > right.Scores.EntryQuality.Score
+		}
+		return left.Scores.AssetQuality.Score > right.Scores.AssetQuality.Score
 	})
 
 	if len(results) > s.cfg.Filters.TopCandidates {

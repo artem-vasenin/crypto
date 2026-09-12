@@ -20,30 +20,30 @@ func (NeutralGrid) Evaluate(c *models.Candidate) models.StrategyResult {
 	}
 
 	if isUpTrend(st1) || isDownTrend(st1) || isUpTrend(st4) || isDownTrend(st4) {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "directional trend detected on 1h/4h"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "directional trend detected on 1h/4h"}
 	}
 
 	if st1.HighState == "HH" && st1.LowState == "LL" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "broadening formation (HH+LL)"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "broadening formation (HH+LL)"}
 	}
 	if st1.HighState == "LH" && st1.LowState == "HL" {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "contracting formation (LH+HL)"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "contracting formation (LH+HL)"}
 	}
 
 	if c.Levels.NearestResistance == 0 || c.Levels.NearestSupport == 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "no complete support/resistance range"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "no complete support/resistance range"}
 	}
 	if c.Indicators.ATR1hPct <= 0 || c.Indicators.ATR1hPct > 3.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "1h volatility too high for neutral grid"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "1h volatility too high for neutral grid"}
 	}
 	if c.Levels.RangeToATR1h < 2.0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "range too narrow versus 1h ATR"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "range too narrow versus 1h ATR"}
 	}
 	if c.Levels.RangeWidthPct < 3 || c.Levels.RangeWidthPct > 15 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "range width outside neutral-grid limits"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "range width outside neutral-grid limits"}
 	}
 	if c.Levels.RangePositionPct < 25 || c.Levels.RangePositionPct > 75 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "price too close to range edge"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "price too close to range edge"}
 	}
 
 	score := 50.0
@@ -61,8 +61,9 @@ func (NeutralGrid) Evaluate(c *models.Candidate) models.StrategyResult {
 
 	score = clamp(score)
 	return models.StrategyResult{
-		Score:  score,
-		Status: status(score),
-		Reason: "low-volatility range with trend and edge protection",
+		Scores:   models.AnalysisScores{EntryQuality: blockScore(score, "neutral-grid suitability")},
+		Decision: models.StrategyDecision{Eligible: status(score) == "consider"},
+		Status:   status(score),
+		Reason:   "low-volatility range with trend and edge protection",
 	}
 }

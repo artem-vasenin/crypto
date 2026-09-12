@@ -118,10 +118,31 @@ type OrderBookMetrics struct {
 	Levels       int     `json:"levels"`
 }
 
-type StrategyResult struct {
+type BlockScore struct {
 	Score  float64 `json:"score"`
 	Status string  `json:"status"`
 	Reason string  `json:"reason"`
+}
+
+type AnalysisScores struct {
+	AssetQuality       BlockScore `json:"asset_quality"`
+	TrendQuality       BlockScore `json:"trend_quality"`
+	EntryQuality       BlockScore `json:"entry_quality"`
+	MarketQuality      BlockScore `json:"market_quality"`
+	DerivativesQuality BlockScore `json:"derivatives_quality"`
+}
+
+type StrategyDecision struct {
+	Eligible        bool     `json:"eligible"`
+	Priority        []string `json:"priority"`
+	BlockingReasons []string `json:"blocking_reasons,omitempty"`
+}
+
+type StrategyResult struct {
+	Scores   AnalysisScores   `json:"scores"`
+	Decision StrategyDecision `json:"decision"`
+	Status   string           `json:"status"`
+	Reason   string           `json:"reason"`
 }
 
 type Candidate struct {

@@ -1,1122 +1,523 @@
-# STRUCTURE.md — структура проекта Universal Bybit Screener
+# STRUCTURE.md — архитектура Universal Bybit Screener / Bot
 
-#
-# 0. Документация проекта
+## 1. Главный принцип
 
-## `README.md`
+Проект разделён на две подсистемы:
 
-**Назначение:** краткая инструкция по проекту:
-- назначение screener и bot;
-- список стратегий;
-- команды сборки;
-- команды тестирования;
-- команды запуска screener;
-- команды запуска bot;
-- описание основных risk settings;
-- предупреждение о Testnet/mainnet.
+```text
+Bybit market data
+       │
+       ▼
+    SCREENER
+       │
+       ▼
+ strategy-screening.json
+       │
+       ▼
+      BOT
+       │
+       ▼
+ Bybit execution
+```
 
-Функций нет.
+Скринер отвечает за исследование и отбор кандидатов. Bot отвечает за повторную safety-проверку и исполнение.
 
-## `AUDIT.md`
-
-**Назначение:** подробный аудит исходного проекта и список исправлений.
-
-Документ содержит:
-- CRITICAL-проблемы;
-- HIGH-проблемы;
-- MEDIUM-проблемы;
-- LOW-проблемы;
-- описание конкретных ошибок исходного execution/screener кода;
-- что именно исправлено;
-- ограничения проведённого тестирования.
-
-Функций нет.
-
-## `STRUCTURE.md`
-
-**Назначение:** карта проекта. Документ описывает назначение каждого файла и каждой функции, а также поток данных и ключевые архитектурные решения.
-
-Функций нет.
-
-
-# 1. Назначение проекта
-
-Проект состоит из двух разных подсистем:
-
-1. **Screener** — получает рыночные данные Bybit, отбирает ликвидные USDT Linear Perpetual-контракты, рассчитывает индикаторы/структуру/уровни/деривативные метрики и ранжирует монеты по выбранной стратегии.
-2. **Bot / Execution Engine** — читает JSON-снимок скриннера, повторно проверяет актуальные рыночные данные перед выставлением заявки и может выставлять PostOnly-лимитные заявки на Bybit. После исполнения контролирует позицию, TP/SL и trailing stop.
-
-Скриннер и торговый бот намеренно разделены через JSON-файл. Это позволяет остановить торговую часть, продолжая исследовать работу скриннера.
+**Directional strategy больше не использует один общий score.**
 
 ---
 
-## 2. Поток данных
+## 2. Pipeline анализа
 
 ```text
-Bybit REST
-   │
-   ├── instruments-info
-   ├── tickers
-   ├── kline
-   ├── open-interest
-   └── funding history
-   │
-   ▼
-internal/analysis
-   │
-   ├── первичный liquidity/price/spread фильтр
-   ├── закрытые свечи
-   ├── RSI / ATR / volume
-   ├── HH/HL/LH/LL
-   ├── support/resistance
-   ├── OI / funding
-   └── order book
-   │
-   ▼
-internal/strategies
-   │
-   └── score + status + reason
-   │
-   ▼
-strategy-screening.json
-   │
-   ▼
-cmd/bot
-   │
-   ├── повторная проверка score
-   ├── актуальный bid/ask
-   ├── instrument limits
-   ├── margin/position limits
-   ├── SL/TP pre-check
-   └── PostOnly order
-   │
-   ▼
-Bybit
-   │
-   ├── private order WS
-   ├── private position WS
-   ├── private execution WS
-   └── private wallet WS
+REST + public WS
+      │
+      ├── price / 24h / liquidity
+      ├── 5m / 15m / 30m / 1h / 4h candles
+      ├── RSI / ATR / volume
+      ├── HH / HL / LH / LL
+      ├── support / resistance
+      ├── funding
+      ├── open interest
+      └── order book
+      │
+      ▼
+Candidate
+      │
+      ▼
+Directional block analysis
+      │
+      ├── Trend Quality
+      ├── Asset Quality
+      ├── Entry Quality
+      ├── Market Quality
+      └── Derivatives Quality
+      │
+      ▼
+Decision.Eligible
+      │
+      ▼
+JSON
 ```
 
 ---
 
-# 3. Файлы проекта
+# 3. Блоки directional analysis
 
-## `go.mod`
+## 3.1 `TrendQuality`
 
-**Назначение:** описание Go-модуля и его внешних зависимостей.
+Самый высокий приоритет.
 
-Содержит:
-- имя модуля `universal-bybit-screener`;
-- требуемую версию Go `1.26.5`;
-- `github.com/gorilla/websocket` для WebSocket;
-- `github.com/joho/godotenv` для загрузки `.env`.
+Источники:
 
-Функций нет.
+- 1h structure;
+- 4h structure;
+- 30m structure.
 
----
+Направление:
 
-## `go.sum`
+```text
+HH + HL = bullish
+LH + LL = bearish
+otherwise = neutral/mixed
+```
 
-**Назначение:** контрольные суммы зависимостей Go.
+Это не просто штраф к score. Для directional execution конфликтующий старший тренд является gate.
 
-Функций нет.
+Примеры:
 
----
+```text
+long + 1h LH/LL -> reject
+long + 4h LH/LL -> reject
+short + 1h HH/HL -> reject
+short + 4h HH/HL -> reject
+```
 
-## `Makefile`
-
-**Назначение:** команды сборки и деплоя.
-
-### `build`
-Собирает два бинарника:
-- `bot`;
-- `screener`.
-
-Сначала создаются временные `.tmp`-файлы, чтобы не заменять рабочий бинарник до успешной компиляции.
-
-### `deploy`
-- получает изменения из Git;
-- запускает сборку;
-- останавливает systemd-сервисы;
-- заменяет бинарники;
-- запускает сервисы.
-
-### `status`
-Показывает состояние systemd-сервисов.
+Это сделано именно для устранения ситуации, когда сильный 5m/15m сигнал перекрывал плохой 1h/4h контекст.
 
 ---
 
-## `.gitignore`
+## 3.2 `AssetQuality`
 
-**Назначение:** исключает из Git секреты, локальные конфиги, бинарники, логи и временные файлы.
+Описывает, насколько сам актив поддерживает выбранное направление на более широком горизонте.
 
-Особенно важные исключения:
-- `.env`;
-- `bot`;
-- `screener`;
-- `*.tmp`;
-- screening JSON;
-- логи;
-- `.DS_Store`.
+Использует:
 
----
-
-## `.env.example`
-
-**Назначение:** пример переменных окружения.
-
-Основные переменные:
-- `BYBIT_API_KEY`;
-- `BYBIT_API_SECRET`.
-
-В исходном проекте также присутствовали переменные Groq. Они не используются текущим screener/bot-кодом.
-
----
-
-## `configs/config.json`
-
-**Назначение:** основной runtime-конфиг.
-
-### `bybit`
-- URL REST API.
-
-### `filters`
-- `max_price` — верхняя граница цены монеты;
-- `min_turnover_24h` — минимальный 24h turnover;
-- `preselect_candidates` — размер предварительной выборки;
-- `top_candidates` — количество результатов;
-- `max_grid_spread_pct` — максимальный bid/ask spread.
-
-### `analysis`
-- количество свечей каждого таймфрейма;
-- лимит OI;
-- лимит funding;
-- глубина order book;
-- допустимый возраст order book.
-
-### `execution`
-- testnet/mainnet;
-- максимальное плечо;
-- маржа на сделку;
-- общий лимит маржи;
-- максимум активных позиций;
-- минимальный score;
-- trailing stop;
-- период проверки;
-- timeout зависшей заявки;
-- консервативные maker/taker fee;
-- дополнительный запас на торговые издержки;
-- максимальный процент SL;
-- минимальный net-profit после оценочных расходов.
-
----
-
-# `config/config.go`
-
-**Назначение:** загрузка и нормализация конфигурации.
-
-### `Load`
-Читает JSON, десериализует его в промежуточную структуру, преобразует duration-строки в `time.Duration`, устанавливает безопасные значения по умолчанию и возвращает готовый `Config`.
-
----
-
-# `models/market.go`
-
-**Назначение:** модели рыночных данных и результата скрининга.
-
-Основные структуры:
-- `Instrument` — спецификация торгового инструмента Bybit;
-- `Ticker` — текущий market snapshot;
-- `Candle` — свеча;
-- `OpenInterestPoint` — исторический OI;
-- `FundingPoint` — исторический funding;
-- `Indicators` — рассчитанные индикаторы;
-- `Pivot` — pivot high/low;
-- `Structure` — состояние HH/HL/LH/LL;
-- `Levels` — support/resistance и характеристики диапазона;
-- `Derivatives` — funding/OI/spread;
-- `OrderBookMetrics` — агрегаты стакана;
-- `StrategyResult` — результат конкретной стратегии;
-- `Candidate` — полный снимок одной монеты;
-- `ScreeningResult` — итоговый JSON скриннера.
-
-Функций нет.
-
----
-
-# `models/execution.go`
-
-**Назначение:** модели торгового движка.
-
-### `BotConfig`
-Хранит настройки исполнения, лимиты риска, комиссии и параметры trailing/pending orders.
-
-### `PositionState`
-Хранит локальное состояние позиции или pending order:
-- символ;
-- сторона;
-- order ID;
-- entry;
-- размер;
-- зарезервированная маржа;
-- фактическое leverage позиции;
-- принадлежность позиции текущему экземпляру (`Managed`);
-- SL/TP;
-- extrema для trailing;
-- состояние pending;
-- признак установленного риска.
-
-Функций нет.
-
----
-
-# `output/json.go`
-
-**Назначение:** безопасная запись screening JSON.
-
-### `WriteJSON`
-Сериализует `ScreeningResult` и атомарно записывает его в файл.
-
-### `WriteJSONIfChanged`
-Сериализует JSON, вычисляет hash и пропускает запись, если содержимое не изменилось.
-
-### `atomicWrite`
-Пишет во временный файл и затем делает `rename`, чтобы потребитель не увидел частично записанный JSON.
-
----
-
-# `internal/bybit/client.go`
-
-**Назначение:** общий REST GET-клиент Bybit для публичных market endpoints.
-
-### `NewClient`
-Создаёт HTTP-клиент с timeout и параметрами retry.
-
-### `doGET`
-Выполняет GET-запрос, проверяет HTTP status и Bybit `retCode`, декодирует `result`, выполняет повторные попытки для временных ошибок.
-
----
-
-# `internal/bybit/helpers.go`
-
-**Назначение:** маленькие вспомогательные функции REST-клиента.
-
-### `f`
-Безопасно преобразует строку в `float64`.
-
-### `ts`
-Преобразует timestamp в миллисекундах в UTC `time.Time`.
-
-### `fmtInt`
-Преобразует положительный integer в строку для query-параметра.
-
----
-
-# `internal/bybit/instruments.go`
-
-**Назначение:** загрузка списка доступных USDT Linear Perpetual инструментов.
-
-### `Instruments`
-Постранично получает `instruments-info`, оставляет только:
-- `LinearPerpetual`;
-- `USDT` quote;
-- `USDT` settle;
-- `Trading`.
-
-Также сохраняет:
-- tick size;
-- min quantity;
-- quantity step;
-- min notional;
-- max order quantity;
-- funding interval.
-
----
-
-# `internal/bybit/tickers.go`
-
-**Назначение:** получение текущего market snapshot.
-
-### `Tickers`
-Получает тикеры всех Linear-контрактов и преобразует:
-- last price;
-- mark/index price;
 - 24h change;
-- turnover;
-- volume;
-- bid/ask;
-- funding;
-- open interest.
+- 3d change;
+- 7d change;
+- RSI 1h;
+- RSI 4h.
+
+Это отвечает на вопрос:
+
+> «Мы вообще хотим торговать этот актив в выбранную сторону?»
 
 ---
 
-# `internal/bybit/klines.go`
+## 3.3 `EntryQuality`
 
-**Назначение:** REST-загрузка исторических свечей.
+Описывает момент входа.
 
-### `Klines`
-Получает свечи указанного символа и таймфрейма, преобразует их в `models.Candle` и сортирует по времени ASC.
+Использует:
 
----
+- 5m structure;
+- 15m structure;
+- RSI 5m;
+- RSI 15m;
+- position внутри 1h range.
 
-# `internal/bybit/derivatives.go`
+Это отвечает на другой вопрос:
 
-**Назначение:** деривативные исторические данные.
+> «Даже если актив подходит для long/short, хорошо ли входить прямо сейчас?»
 
-### `OpenInterest`
-Получает исторический OI и сортирует его от старого к новому.
-
-### `Funding`
-Получает историю funding rate и сортирует её по времени.
-
----
-
-# `internal/bybit/ws_klines.go`
-
-**Назначение:** локальный cache свечей, который первоначально прогревается REST и затем обновляется WebSocket.
-
-### `NewKlineCache`
-Создаёт cache.
-
-### `Warmup`
-Записывает REST-историю конкретного символа и таймфрейма.
-
-### `UpdateWS`
-Заменяет текущую свечу при обновлении или добавляет новую свечу.
-
-### `Get`
-Возвращает копию массива свечей, защищая внутренний cache от изменения вызывающим кодом.
-
-### `ParseWSKline`
-Преобразует WebSocket JSON в `models.Candle`.
-
-### `parseFloat`
-Преобразует динамическое JSON-значение в число.
-
-### `fmtString`
-Преобразует динамическое значение в строку.
+`EntryQuality` не имеет права самостоятельно отменять плохой macro context.
 
 ---
 
-# `internal/bybit/ws_orderbook.go`
+## 3.4 `MarketQuality`
 
-**Назначение:** локальный order book cache.
+Использует:
 
-### `NewOrderBookCache`
-Создаёт cache стаканов.
-
-### `Update`
-Применяет snapshot/delta к локальным bid/ask уровням и фиксирует время последнего обновления.
-
-### `GetMetrics`
-Берёт лучшие 10 уровней с каждой стороны и рассчитывает:
-- bid notional;
-- ask notional;
-- imbalance;
-- bid/ask ratio.
-
-### `Age`
-Возвращает возраст последнего обновления стакана. Используется как предохранитель от анализа устаревшего order book.
-
----
-
-# `internal/bybit/ws_public.go`
-
-**Назначение:** публичный WebSocket Bybit для order book и klines.
-
-### `NewPublicWSStream`
-Создаёт поток с cache стакана/свечей и выбранной глубиной order book.
-
-### `topicsForSymbol`
-Формирует список подписок одного символа.
-
-### `AddSymbols`
-Добавляет новые символы в подписки. Это исправляет исходную проблему, когда после первого screening cycle новые монеты никогда не попадали в WS.
-
-### `Start`
-Запускает поток, если он ещё не был запущен.
-
-### `loop`
-Подключается к Bybit, подписывается, читает сообщения и автоматически переподключается.
-
-### `sleepContext`
-Ожидает заданное время с возможностью немедленной отмены через context.
-
-### `subscribeAllLocked`
-Подписывает соединение на все накопленные topics пакетами.
-
-### `keepAlive`
-Отправляет WebSocket ping.
-
-### `parseMessage`
-Распределяет сообщения между order book cache и kline cache.
-
----
-
-# `internal/analysis/service.go`
-
-**Назначение:** центральный движок скрининга.
-
-### `NewService`
-Создаёт analysis service и все необходимые cache/WS-компоненты.
-
-### `Run`
-Полный цикл скрининга:
-1. получает instruments;
-2. получает tickers;
-3. применяет первичные фильтры;
-4. сортирует по turnover;
-5. выбирает preselection;
-6. обеспечивает актуальные свечи и стаканы;
-7. параллельно анализирует монеты;
-8. сортирует по выбранной стратегии;
-9. возвращает Top N.
-
-### `ensureMarketData`
-Гарантирует:
-- WS запущен;
-- новые символы подписаны;
-- для новых символов есть REST warmup;
-- order book получил свежий snapshot.
-
-### `hasEnoughKlines`
-Проверяет наличие достаточного количества свечей в cache.
-
-### `allOrderBooksReady`
-Проверяет свежесть стаканов всех выбранных символов.
-
-### `warmupKlinesREST`
-Параллельно загружает историю свечей для новых/непрогретых символов.
-
-### `fetchWarmup`
-Загружает один конкретный таймфрейм и помещает его в cache.
-
-### `analyze`
-Формирует полный `Candidate`:
-- только закрытые свечи;
-- RSI;
-- ATR;
-- volume;
-- structure;
-- support/resistance;
-- funding;
-- OI;
 - spread;
-- order book;
-- результаты всех стратегий.
+- 24h turnover;
+- 1h volume ratio;
+- 1h volume trend.
 
-Критические производные данные без подтверждения теперь приводят к пропуску кандидата, а не к подстановке нуля.
-
-### `closedCandles`
-Убирает последнюю формирующуюся свечу перед расчётом стратегии.
-
-### `fundingAverage24h`
-Рассчитывает средний funding за последние 24 часа относительно последней доступной точки.
-
-### `changeN`
-Рассчитывает изменение цены за заданное число свечей.
-
-### `spreadPct`
-Рассчитывает bid/ask spread.
-
-### `BuildAIPrompt`
-Формирует короткое описание назначения screening JSON для последующего AI-анализа.
-
-### `minInt`
-Возвращает меньшее из двух целых.
-
-### `maxInt`
-Возвращает большее из двух целых.
+Цель — не искать направление, а проверять качество торговой среды.
 
 ---
 
-# `internal/indicators/indicators.go`
+## 3.5 `DerivativesQuality`
 
-**Назначение:** математические индикаторы.
+Использует:
 
-### `RSI`
-Рассчитывает RSI по Wilder smoothing.
+- current funding;
+- OI change;
+- order-book imbalance.
 
-### `ATR`
-Рассчитывает ATR по Wilder smoothing.
-
-### `trueRange`
-Рассчитывает True Range одной свечи.
-
-### `VolumeRatio`
-Сравнивает turnover последней закрытой свечи со средним turnover предыдущих свечей.
-
-В исправленной версии устранён off-by-one исходного алгоритма.
-
-### `VolumeTrend`
-Сравнивает средний turnover короткого и длинного периода.
+Этот блок имеет более низкий приоритет, чем trend/asset/entry. Он не должен превращать плохую монету в хорошую только потому, что стакан временно перекошен.
 
 ---
 
-# `internal/structure/structure.go`
+# 4. Directional decision
 
-**Назначение:** анализ рыночной структуры и уровней.
+`StrategyResult` содержит:
 
-### `Analyze`
-Ищет pivot highs/lows и определяет:
-- HH;
-- LH;
-- HL;
-- LL;
-- EQ.
+```text
+Scores
+Decision
+Status
+Reason
+```
 
-### `fetchHighState`
-Определяет состояние последовательности high.
+`Scores`:
 
-### `fetchLowState`
-Определяет состояние последовательности low.
+```text
+AssetQuality
+TrendQuality
+EntryQuality
+MarketQuality
+DerivativesQuality
+```
 
-### `Levels`
-Находит ближайшие support/resistance и рассчитывает положение цены внутри диапазона.
+`Decision`:
 
-### `ApplyATR`
-Рассчитывает ширину диапазона в единицах ATR.
+```text
+Eligible
+Priority
+BlockingReasons
+```
 
----
+Текущие минимумы:
 
-# `internal/strategies/strategy.go`
+```text
+TrendQuality       >= 60
+AssetQuality       >= 55
+EntryQuality       >= 60
+MarketQuality      >= 60
+DerivativesQuality >= 40
+```
 
-**Назначение:** общий интерфейс стратегий и регистрация стратегий.
+Приоритет:
 
-### `Names`
-Возвращает все зарегистрированные стратегии:
-- `long`;
-- `short`;
-- `long-grid`;
-- `short-grid`;
-- `neutral-grid`.
+```text
+1. TrendQuality
+2. AssetQuality
+3. EntryQuality
+4. MarketQuality
+5. DerivativesQuality
+```
 
-### `New`
-Создаёт стратегию по имени.
+Нет операции вида:
 
-В исходной версии grid-стратегии существовали как файлы, но фактически не были зарегистрированы.
+```text
+score = trend + RSI + volume + OI + orderbook
+```
 
-### `clamp`
-Ограничивает score диапазоном 0–100 и округляет.
-
-### `status`
-Преобразует score в статус:
-- consider;
-- watch;
-- risky;
-- avoid.
-
----
-
-# `internal/strategies/long.go`
-
-**Назначение:** directional long screening.
-
-### `Name`
-Возвращает `long`.
-
-### `Evaluate`
-Применяет:
-- защиту от macro downtrend;
-- защиту от falling knife;
-- volatility gate;
-- spread gate;
-- order book imbalance;
-- funding gate;
-- расстояние до сопротивления;
-- RSI;
-- OI expansion;
-- затем считает score по нескольким таймфреймам.
+Это принципиальное архитектурное решение.
 
 ---
 
-# `internal/strategies/short.go`
+# 5. Screening ranking
 
-**Назначение:** directional short screening.
+После анализа результаты сортируются так:
 
-### `Name`
-Возвращает `short`.
+1. `Eligible=true` выше `Eligible=false`;
+2. внутри группы — `EntryQuality`;
+3. затем — `AssetQuality`.
 
-### `Evaluate`
-Зеркально long-стратегии:
-- защищает от macro uptrend;
-- блокирует активный micro pump;
-- проверяет volatility;
-- spread;
-- ask-side imbalance;
-- funding;
-- расстояние до поддержки;
-- RSI;
-- OI;
-- затем считает score.
+Это позволяет top candidates отражать качество реальных торговых возможностей, а не просто сумму разнородных сигналов.
 
 ---
 
-# `internal/strategies/long_grid.go`
+# 6. Grid strategies
 
-**Назначение:** поиск кандидатов для long-grid сценария.
+`long-grid`, `short-grid`, `neutral-grid` пока сохраняют собственную suitability-модель.
 
-### `Name`
-Возвращает `long-grid`.
+Они являются screening-only.
 
-### `Evaluate`
-Проверяет наличие диапазона, положение цены, структуру 1h и отношение диапазона к ATR.
+Bot никогда не должен использовать их для directional execution.
 
-Важно: это **не реализация торгового grid-бота**. Это только screening strategy.
+`neutral-grid` имеет отдельные gates:
 
----
-
-# `internal/strategies/short_grid.go`
-
-**Назначение:** поиск кандидатов для short-grid сценария.
-
-### `Name`
-Возвращает `short-grid`.
-
-### `Evaluate`
-Проверяет наличие диапазона, положение цены ближе к resistance, структуру 1h и Range/ATR.
-
-Это также screening strategy, а не исполнение grid-ордера.
+- отсутствие явного 1h/4h directional trend;
+- допустимый ATR;
+- достаточная ширина range относительно ATR;
+- цена не у края диапазона.
 
 ---
 
-# `internal/strategies/neutral_grid.go`
+# 7. Execution pipeline
 
-**Назначение:** поиск настоящего низковолатильного боковика.
-
-### `Name`
-Возвращает `neutral-grid`.
-
-### `Evaluate`
-Блокирует:
-- направленный 1h trend;
-- направленный 4h trend;
-- broadening formation HH+LL;
-- contracting formation LH+HL;
-- отсутствие диапазона;
-- слишком высокую ATR 1h;
-- слишком узкий диапазон;
-- слишком широкий диапазон;
-- положение цены возле границы.
-
-Исходная версия была слишком мягкой и могла пропускать волатильные/направленные ситуации.
-
----
-
-# `internal/execution/risk.go`
-
-**Назначение:** расчёт размера позиции и защитных уровней.
-
-### `CalculateDynamicStopLoss`
-Строит SL относительно pivot и ATR. Если pivot отсутствует, используется только ATR-дистанция.
-
-### `CalculateDynamicTakeProfit`
-Рассчитывает TP по минимальному R:R.
-
-### `CalculateDynamicLeverage`
-Снижает плечо при высокой ATR.
-
-### `CalculatePositionQty`
-Рассчитывает количество контрактов и **не увеличивает молча размер позиции**, если минимальный notional биржи больше допустимого размера сделки.
-
-### `RoundToStep`
-Округляет значение к шагу.
-
-### `floorToStep`
-Округляет вниз.
-
-### `roundPriceDown`
-Округляет цену вниз.
-
-### `roundPriceUp`
-Округляет цену вверх.
-
-### `GetPrecision`
-Определяет количество знаков после запятой для шага.
-
-### `FormatStep`
-Форматирует значение для API Bybit.
-
-### `ValidateStopLoss`
-Проверяет направление SL, минимальную ATR-дистанцию и максимальный риск.
-
-### `ValidateTakeProfit`
-Проверяет направление TP и минимальную дистанцию.
-
-### `EstimatedRoundTripCostPct`
-Оценивает round-trip trading cost с запасом.
+```text
+screening JSON
+      │
+      ▼
+Decision.Eligible?
+      │
+      ▼
+screening age check
+      │
+      ▼
+position / cooldown / margin limits
+      │
+      ▼
+fresh bid/ask
+      │
+      ▼
+instrument limits
+      │
+      ▼
+leverage + quantity
+      │
+      ▼
+SL / TP calculation
+      │
+      ▼
+risk validation
+      │
+      ▼
+PostOnly order with TP/SL
+```
 
 ---
 
-# `internal/execution/engine.go`
+# 8. Screening freshness
 
-**Назначение:** основной торговый движок.
+Bot принимает только screening snapshot не старше `max_screening_age`.
 
-### `NewEngine`
-Создаёт execution engine, локальное состояние и WebSocket engine.
+Default:
 
-### `InitWebSocket`
-Запускает публичный и приватный Bybit WebSocket.
+```text
+3m
+```
 
-### `RefreshState`
-При старте синхронизирует:
-- balance;
-- открытые позиции;
-- открытые заявки.
-
-Это исправляет проблему исходного бота, который после рестарта практически не знал реальное состояние счёта.
-
-### `handleBalanceUpdateWS`
-Обновляет локальный доступный баланс.
-
-### `handlePositionUpdateWS`
-Синхронизирует локальную позицию с реальным position stream.
-
-Размер позиции теперь является источником истины вместо предположения, что отправленная заявка уже стала позицией.
-
-### `handleOrderUpdateWS`
-Отслеживает lifecycle заявки и удаляет pending-состояние после отмены/reject.
-
-### `handleExecutionWS`
-Обрабатывает фактические execution events:
-- удаляет дубликаты по `ExecID`;
-- игнорирует execution чужих/неуправляемых позиций;
-- проверяет `OrderID`;
-- проверяет соответствие стороны (`long=Buy`, `short=Sell`);
-- сохраняет entry snapshot только после фактического fill;
-- запускает fallback-установку SL/TP.
-
-### `attachRiskAfterFill`
-Fallback для установки SL/TP после фактического fill, если они не были подтверждены/установлены.
-
-### `calculateRiskLevels`
-Единая проверка SL/TP до отправки заявки.
-
-### `RefreshBalance`
-Получает `totalAvailableBalance` Unified Account.
-
-### `ProcessCandidate`
-Основная торговая функция. Созданная здесь позиция получает `Managed=true`, поэтому только этот экземпляр execution engine имеет право обрабатывать её execution и trailing lifecycle.
-- проверяет стратегию;
-- проверяет cooldown;
-- проверяет число позиций;
-- проверяет общий лимит маржи;
-- проверяет баланс;
-- получает свежий bid/ask;
-- получает instrument limits;
-- рассчитывает quantity;
-- устанавливает leverage;
-- рассчитывает SL/TP;
-- выставляет PostOnly order на maker-стороне spread.
-
-### `sideEntryPrice`
-Возвращает bid для Buy и ask для Sell.
-
-### `FormatPriceForSide`
-Округляет Buy вниз и Sell вверх, чтобы не превратить maker-заявку в taker.
-
-### `CleanupPendingOrders`
-Отменяет слишком долго висящие pending orders.
-
-### `UpdateTrailingStops`
-Передвигает SL только в сторону уменьшения риска.
-
-### `LogActivePositions`
-Выводит локальное состояние позиций.
-
-### `SetTradingStopMarkPrice`
-Устанавливает full-position TP/SL через Bybit `trading-stop`.
-
-### `buildPostOnlyOrderParams`
-Строит и форматирует параметры Bybit для открытия позиции. Проверяет тестами, что сторона, PostOnly, TP/SL и Full TP/SL mode передаются согласованно.
-
-### `placePostOnlyOrder`
-Выставляет Limit/PostOnly заявку. TP/SL передаются уже при создании заявки с `tpslMode=Full`, `MarkPrice` и рыночным исполнением TP/SL. После фактического fill движок дополнительно выполняет `trading-stop`, пересчитывая уровни от реальной цены исполнения.
-
-### `cancelOrder`
-Отменяет зависшую заявку.
-
-### `setLeverage`
-Устанавливает leverage и допускает только ожидаемый ответ "leverage unchanged".
-
-### `refreshPositions`
-Получает реальные открытые позиции после старта. Позиции, происхождение которых текущий процесс не может доказать, помечаются как `Managed=false`. Это предотвращает управление чужой позицией при одновременном запуске long/short ботов.
-
-### `refreshOpenOrders`
-Получает реальные открытые заявки после старта и не выдаёт им статус управляемых заявок текущего процесса.
-
-### `getLiveTicker`
-Получает актуальные bid/ask непосредственно перед торговой заявкой.
-
-### `getInstrumentLimits`
-Получает tick size, quantity step, min/max quantity и min notional.
-
-### `publicGET`
-Выполняет публичный GET и проверяет Bybit envelope.
-
-### `doSignedGET`
-Выполняет подписанный GET Bybit V5.
-
-### `doSignedPOST`
-Выполняет подписанный POST Bybit V5.
-
-### `checkAPIRetCode`
-Проверяет `retCode` ответа Bybit.
-
-### `parseFloat`
-Преобразует строку API в `float64`.
-
-### `mathCeilToStep`
-Округляет значение вверх к торговому шагу.
-
-### `mathAbsPct`
-Считает процентную дистанцию.
+Причина: повторный live bid/ask не обновляет старые RSI, structure, levels и derivatives.
 
 ---
 
-# `internal/execution/ws_engine.go`
+# 9. Risk model
 
-**Назначение:** приватный и публичный WebSocket торгового движка.
+## Stop Loss
 
-### `NewWSEngine`
-Создаёт WebSocket engine и callback-и.
+`CalculateDynamicStopLoss`:
 
-### `GetLatestPrice`
-Возвращает последнюю известную цену.
+- использует pivot соответствующего направления;
+- использует минимум `1.5 * ATR1h`;
+- проверяет максимальный допустимый SL;
+- проверяет, что SL находится с правильной стороны entry.
 
-### `GetBTCTrend15m`
-Возвращает изменение BTC относительно 15-минутной базовой цены.
+## Take Profit
 
-### `StartPublicTickerStream`
-Запускает публичный ticker stream.
+`CalculateDynamicTakeProfit`:
 
-### `connectAndReadPublic`
-Подключается к публичному stream и восстанавливает соединение.
+- минимум RR = 2;
+- long: TP выше entry;
+- short: TP ниже entry.
 
-### `parsePublicMessage`
-Извлекает last price из ticker сообщений.
+`calculateRiskLevels` дополнительно вычитает оценочные торговые расходы.
 
-### `SubscribeTicker`
-Добавляет конкретный символ в ticker subscriptions.
-
-### `resubscribeTickersLocked`
-Повторно подписывает ticker topics после reconnect.
-
-### `StartPrivateStream`
-Запускает private stream.
-
-### `connectAndReadPrivate`
-Авторизуется и подписывается на:
-- position;
-- wallet;
-- execution;
-- order.
-
-### `startHeartbeat`
-Отправляет heartbeat ping.
-
-### `parsePrivateMessage`
-Разбирает четыре типа private событий и передаёт их в callbacks.
-
-### `sleepContext`
-Ожидает reconnect delay с поддержкой context cancellation.
+В short была исправлена ошибка расчёта процентной дистанции: `TP-entry` должен использоваться по модулю.
 
 ---
 
-# `internal/execution/snapshot_logger.go`
+# 10. TP/SL lifecycle
 
-**Назначение:** сохранение торгового снимка при необходимости аудита.
+Основная PostOnly заявка содержит TP/SL:
 
-### `SaveTradeSnapshot`
-Создаёт JSON-файл только для фактически исполненного входа. В файл попадают:
-- символ;
-- стороной;
-- ценой;
-- размером;
+```text
+Full
+MarkPrice
+TP Market
+SL Market
+```
+
+После fill второй `trading-stop` с теми же уровнями не отправляется.
+
+Причина: во время реального запуска Bybit возвращал `34040 not modified`, потому что risk levels уже были заданы на основной заявке.
+
+Локальное состояние после успешного создания заявки:
+
+```text
+RiskAttached = true
+```
+
+Execution WebSocket используется для:
+
+- подтверждения фактического fill;
+- snapshot logging;
+- проверки стороны/order ID.
+
+---
+
+# 11. Managed state
+
+`PositionState.Managed` разделяет:
+
+```text
+managed=true
+```
+
+позиции/заявки, созданные текущим bot instance, и
+
+```text
+managed=false
+```
+
+чужие или найденные при startup reconciliation.
+
+Unmanaged positions:
+
+- не управляются trailing;
+- не получают snapshot как вход текущего бота;
+- не используются как собственные execution states;
+- при этом учитываются safety logic, чтобы бот не превышал лимиты аккаунта.
+
+---
+
+# 12. Long + Short одновременно
+
+Оба экземпляра получают один private execution stream.
+
+Поэтому execution обрабатывается только если:
+
+```text
+position exists
+AND
+Managed=true
+AND
+OrderID matches
+AND
+execution side matches bot target side
+```
+
+При конфликте стороны символ блокируется для текущего engine и пишется `[CRITICAL]`.
+
+---
+
+# 13. Snapshots
+
+Snapshot создаётся только после реального `execution`.
+
+Сохраняются:
+
+- symbol;
+- side;
+- actual execution price;
+- actual execution quantity;
 - leverage;
 - order ID;
-- причиной стратегии;
-- полным candidate snapshot;
-- BTC trend;
-- фактические `execution_id`, `execution_time` и комиссия.
+- execution ID;
+- execution fee;
+- execution time;
+- full Candidate;
+- BTC 15m context.
 
-Исправлена потенциальная panic при слишком коротком `orderID`. Файл создаётся рядом с исполняемым бинарником в `snapshots/`.
-
----
-
-# `internal/execution/risk_test.go`
-
-**Назначение:** unit-тесты критической математики риска.
-
-Проверяются:
-- корректность SL;
-- fallback при отсутствии pivot;
-- rejection при недостаточном min notional;
-- TP;
-- динамическое снижение leverage;
-- корректность параметров PostOnly + TP/SL заявки.
+Это основа дальнейшего research dataset.
 
 ---
 
-# `internal/strategies/strategy_test.go`
+# 14. Пакеты
 
-**Назначение:** unit-тесты регистрации стратегий и neutral-grid.
+## `cmd/screener`
 
-Проверяется:
-- наличие всех пяти стратегий;
-- rejection directional trend для neutral-grid.
+CLI entrypoint скриннера.
 
----
+## `cmd/bot`
 
-# `cmd/screener/main.go`
+CLI entrypoint торгового движка.
 
-**Назначение:** executable для запуска скриннера.
+## `config`
 
-### `main`
-- загружает конфиг;
-- создаёт выбранную стратегию;
-- создаёт Bybit client;
-- создаёт analysis service;
-- запускает первый screening cycle;
-- затем повторяет его по interval.
+Загрузка JSON runtime-конфигурации.
 
-### `executeScreening`
-Запускает один screening cycle с timeout, сохраняет JSON и пишет результат в лог.
+## `models`
 
----
+Domain models рынка, анализа и execution state.
 
-# `cmd/bot/main.go`
+## `internal/bybit`
 
-**Назначение:** executable торгового бота.
+REST и WebSocket интеграция Bybit.
 
-### `main`
-- проверяет, что стратегия `long` или `short`;
-- загружает конфиг;
-- читает API credentials;
-- создаёт execution engine;
-- запускает WebSocket;
-- синхронизирует состояние счёта;
-- периодически обрабатывает screening JSON.
+## `internal/indicators`
 
-### `processIteration`
-- отменяет зависшие pending orders;
-- читает screening JSON;
-- параллельно обрабатывает кандидатов;
-- обновляет trailing stops;
-- вызывает `ProcessCandidate`.
+RSI, ATR, volume metrics.
 
----
+## `internal/structure`
 
-# `output/json.go`
+Pivot/HH/HL/LH/LL и support/resistance.
 
-См. описание выше. Это единственный слой, отвечающий за запись screening snapshot на диск.
+## `internal/strategies`
 
----
+Стратегии и directional block scoring.
 
-## 4. Файлы, которые были в исходном ZIP, но не являются исходниками
+Основные файлы:
 
-### `internal/.DS_Store`
-macOS metadata-файл. На работу проекта не влияет. В исправленный архив не включён.
+- `strategy.go` — общие scoring helpers и decision gates;
+- `long.go` — long block analysis;
+- `short.go` — short block analysis;
+- `long_grid.go` — long-grid suitability;
+- `short_grid.go` — short-grid suitability;
+- `neutral_grid.go` — neutral-grid suitability.
 
-### `cmd/.DS_Store`
-macOS metadata-файл. На работу проекта не влияет. В исправленный архив не включён.
+## `internal/analysis`
+
+Собирает Candidate и применяет стратегии.
+
+## `internal/execution`
+
+Ордеры, risk, positions, WebSocket state и snapshots.
+
+## `output`
+
+Атомарная запись screening JSON.
 
 ---
 
-# 5. Что принципиально изменено
+# 15. Тестирование
 
-1. Зарегистрированы все пять screening strategies.
-2. Bot больше не пытается торговать `long-grid`, `short-grid` и `neutral-grid` как обычными directional позициями.
-3. PostOnly entry теперь выставляется на правильной стороне spread.
-4. TP/SL рассчитываются **до** заявки и передаются вместе с order create.
-5. Добавлен pre-trade risk gate.
-6. Добавлен реальный max-total-margin контроль.
-7. Pending order отделён от фактически открытой позиции.
-8. Добавлен order WebSocket lifecycle.
-9. Добавлен startup reconciliation с Bybit.
-10. Добавлена отмена зависших pending orders.
-11. Убран вызов устаревшего `switch-isolated` из торгового пути.
-12. Баланс Unified Account берётся через `totalAvailableBalance`.
-13. Установлен обязательный `tpslMode=Full` для position trading stop.
-14. Скриннер анализирует закрытые свечи.
-15. Исправлен VolumeRatio off-by-one.
-16. WS universe теперь обновляется при изменении Top-N.
-17. Order book имеет проверку свежести.
-18. Neutral-grid сделан существенно строже.
-19. Quantity больше не увеличивается молча сверх допустимой маржи ради exchange minimum.
-20. Добавлены unit-тесты критической risk/strategy логики.
+Основные команды:
+
+```bash
+go test ./...
+go vet ./...
+go build ./cmd/screener
+go build ./cmd/bot
+```
+
+Особенно важные тесты:
+
+- регистрация всех стратегий;
+- rejection long при конфликте 1h/4h;
+- возможность short при согласованных блоках;
+- neutral-grid rejection directional trend;
+- SL direction;
+- TP direction;
+- short TP positive distance;
+- position sizing exchange minimum;
+- PostOnly + TP/SL parameters;
+- target side long/short.
 
 ---
 
-# 6. Проверка исправленной версии
+# 16. Research roadmap
 
-Production-архив сохраняет `go 1.26.5`. В среде подготовки архива Go 1.26.5 был недоступен, поэтому полный набор `go test ./...` дополнительно прогонялся на Go 1.23.2 с локальными compile-only заглушками только для `gorilla/websocket` и `godotenv`. Все пакеты и unit-тесты прошли. Заглушки в production-архив не входят.
+Система специально не пытается сейчас «найти идеальные веса».
 
-Дополнительно проверено статически:
-- `PositionState` содержит `Leverage`, который используется execution engine;
-- `short` всегда соответствует `Sell`, `long` — `Buy`;
-- PostOnly для Buy ставится по bid, для Sell — по ask;
-- TP/SL передаются в `/v5/order/create`;
-- Full TP/SL использует market trigger orders;
-- snapshot создаётся только после execution event и защищён от повторной записи;
-- execution с неправильной стороной блокирует символ;
-- Unified Account balance читается через `totalAvailableBalance`.
+Следующий цикл:
 
-# 7. Важное ограничение
+```text
+real entry snapshot
+       ↓
+trade outcome
+       ↓
+block-by-block analysis
+       ↓
+find repeatable patterns
+       ↓
+adjust gates/thresholds
+       ↓
+collect new sample
+```
 
-Это исправленная и существенно более безопасная версия исходного проекта, но это всё ещё не production-grade торговая система.
-
-Перед реальной торговлей необходимо отдельно проверить на Bybit Testnet:
-- one-way position mode;
-- фактические fee rates аккаунта;
-- поведение PostOnly;
-- partial fills;
-- TP/SL после partial fill;
-- reconnect WebSocket;
-- отмену pending orders;
-- restart/reconciliation;
-- liquidation/risk-limit behaviour;
-- rate limits;
-- реальные min/max order quantities.
-
-Особенно важно не считать наличие unit-тестов доказательством корректности реальной торговли: unit-тесты не могут проверить внешний matching engine Bybit.
-
-# 8. Дополнение после практической проверки execution
-
-## `internal/execution/snapshot_logger.go` — уточнение
-
-`SaveTradeSnapshot` вызывается из execution lifecycle только после подтверждённого события `execution` от Bybit. Создание PostOnly-заявки само по себе snapshot не создаёт.
-
-Сохраняемые дополнительные данные:
-- фактическая комиссия исполнения;
-- `execution_id`;
-- фактическое время исполнения;
-- фактические цена и количество исполнения;
-- order ID;
-- leverage;
-- полный screening `Candidate`.
-
-## `internal/execution/ws_engine.go` — уточнение
-
-`ExecutionLog` теперь также содержит `OrderID`, полученный из private execution stream. Это позволяет однозначно связать фактический fill с заявкой, которая его породила.
-
-## `internal/execution/engine.go` — уточнение
-
-`handleExecutionWS` выполняет следующие важные действия:
-
-1. Отбрасывает дубликаты execution по `ExecID`.
-2. Проверяет, что execution относится к управляемой этим процессом заявке.
-3. Проверяет `OrderID` и сторону фактического исполнения.
-4. При первом фактическом входе сохраняет immutable entry snapshot и запускает установку SL/TP.
-
-При несовпадении направления (`short`/`Sell` ожидает `Buy` и наоборот) символ помещается в `disabledTokens`, а в лог пишется критическая ошибка.
-
-## `models/execution.go` — уточнение
-
-`PositionState` дополнительно хранит:
-
-- `Leverage` — leverage конкретной позиции;
-- `SnapshotSaved` — защита от повторного создания entry snapshot при нескольких execution events, например при partial fills;
-- `Managed` — признак, что позиция/заявка была создана текущим экземпляром execution engine.
+Нужно накапливать выборку, а не подгонять стратегию под 1–2 сделки.

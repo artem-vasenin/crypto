@@ -9,12 +9,12 @@ func (ShortGrid) Name() string { return "short-grid" }
 
 func (ShortGrid) Evaluate(c *models.Candidate) models.StrategyResult {
 	if c.Levels.NearestSupport == 0 || c.Levels.NearestResistance == 0 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "missing support/resistance boundaries"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "missing support/resistance boundaries"}
 	}
 
 	// Hard Gate: Вход слишком близко к поддержке (< 25% высоты канала)
 	if c.Levels.RangePositionPct < 25 {
-		return models.StrategyResult{Score: 0, Status: "reject", Reason: "entry too deep inside the range"}
+		return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(0, "grid gate failed")}, Decision: models.StrategyDecision{Eligible: false}, Status: "reject", Reason: "entry too deep inside the range"}
 	}
 
 	score := 40.0
@@ -31,5 +31,5 @@ func (ShortGrid) Evaluate(c *models.Candidate) models.StrategyResult {
 	}
 
 	score = clamp(score)
-	return models.StrategyResult{Score: score, Status: status(score), Reason: "descending channel near resistance zone"}
+	return models.StrategyResult{Scores: models.AnalysisScores{EntryQuality: blockScore(score, "grid suitability")}, Decision: models.StrategyDecision{Eligible: status(score) == "consider"}, Status: status(score), Reason: "descending channel near resistance zone"}
 }

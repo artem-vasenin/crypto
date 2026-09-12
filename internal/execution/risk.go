@@ -65,7 +65,7 @@ func CalculateDynamicLeverage(c models.Candidate, targetStrategy string, maxLeve
 	}
 
 	res, ok := c.Strategies[targetStrategy]
-	if !ok || res.Score < 50 {
+	if !ok || !res.Decision.Eligible {
 		return 1
 	}
 

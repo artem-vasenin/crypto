@@ -55,6 +55,10 @@ func main() {
 	if err != nil {
 		pendingTimeout = 5 * time.Minute
 	}
+	maxScreeningAge, err := time.ParseDuration(cfg.Execution.MaxScreeningAge)
+	if err != nil {
+		maxScreeningAge = 3 * time.Minute
+	}
 
 	botCfg := models.BotConfig{
 		ApiKey:              apiKey,
@@ -64,7 +68,6 @@ func main() {
 		MarginPerTradeUSD:   cfg.Execution.MarginPerTradeUSD,
 		MaxTotalMarginUSD:   cfg.Execution.MaxTotalMarginUSD,
 		MaxActivePositions:  cfg.Execution.MaxActivePositions,
-		MinScore:            cfg.Execution.MinScore,
 		TrailingPct:         cfg.Execution.TrailingPct,
 		CheckInterval:       checkInterval,
 		PendingOrderTimeout: pendingTimeout,
@@ -73,6 +76,7 @@ func main() {
 		ExtraCostPct:        cfg.Execution.ExtraCostPct,
 		MaxStopLossPct:      cfg.Execution.MaxStopLossPct,
 		MinNetProfitPct:     cfg.Execution.MinNetProfitPct,
+		MaxScreeningAge:     maxScreeningAge,
 	}
 
 	engine := execution.NewEngine(botCfg, *strategyName)
@@ -133,8 +137,13 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 		return
 	}
 
-	log.Printf("[ENGINE] snapshot=%s candidates=%d",
-		result.GeneratedAt.Format(time.RFC3339), len(result.Candidates))
+	age := time.Since(result.GeneratedAt)
+	log.Printf("[ENGINE] snapshot=%s age=%s candidates=%d",
+		result.GeneratedAt.Format(time.RFC3339), age.Round(time.Second), len(result.Candidates))
+	if age < 0 || age > engine.MaxScreeningAge() {
+		log.Printf("[WARN] screening snapshot is stale: age=%s max=%s", age.Round(time.Second), engine.MaxScreeningAge())
+		return
+	}
 
 	if concurrency <= 0 {
 		concurrency = 4
