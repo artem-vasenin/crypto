@@ -179,25 +179,32 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	e.mu.Lock()
 	candidate, hasCandidate := e.candidatesCache[exec.Symbol]
 	pos, exists := e.positions[exec.Symbol]
-	if !exists {
+	if !exists || !pos.Managed {
+		e.mu.Unlock()
+		return
+	}
+
+	// Process only executions belonging to the order created by this engine.
+	// This is important when long and short bots run against the same account:
+	// each bot receives the same private execution stream.
+	if pos.OrderID != "" && exec.OrderID != "" && pos.OrderID != exec.OrderID {
 		e.mu.Unlock()
 		return
 	}
 
 	// The execution side must match the side selected by this bot. A mismatch
-	// means that the local state and the exchange state disagree, so trading
-	// for this symbol is disabled until the situation is investigated.
-	if exec.Side != e.targetSide {
+	// means that local state and the exchange state disagree, so trading for
+	// this symbol is disabled until the situation is investigated.
+	if exec.Side != e.targetSide || exec.Side != pos.Side {
 		e.disabledTokens[exec.Symbol] = true
-		log.Printf("[CRITICAL] execution side mismatch for %s: bot expects %s, exchange execution is %s; symbol disabled",
-			exec.Symbol, e.targetSide, exec.Side)
+		log.Printf("[CRITICAL] execution side mismatch for %s: bot expects %s, local side=%s, exchange execution=%s; symbol disabled",
+			exec.Symbol, e.targetSide, pos.Side, exec.Side)
 		e.mu.Unlock()
 		return
 	}
 
-	riskAttached := pos.RiskAttached
 	riskAttachInProgress := pos.RiskAttachInProgress
-	if !hasCandidate || riskAttached || riskAttachInProgress {
+	if !hasCandidate || riskAttachInProgress {
 		e.mu.Unlock()
 		return
 	}
@@ -208,10 +215,13 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 		orderID = pos.OrderID
 	}
 	leverage := pos.Leverage
-	if !pos.SnapshotSaved {
+	snapshotNeeded := !pos.SnapshotSaved
+	if snapshotNeeded {
 		pos.SnapshotSaved = true
-		e.mu.Unlock()
+	}
+	e.mu.Unlock()
 
+	if snapshotNeeded {
 		btcTrend, _ := e.wsEngine.GetBTCTrend15m()
 		if err := SaveTradeSnapshot(
 			exec.Symbol,
@@ -236,8 +246,6 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 			log.Printf("[SNAPSHOT] saved entry snapshot for %s %s order=%s exec_price=%.8f exec_qty=%.8f",
 				exec.Symbol, exec.Side, orderID, exec.ExecPrice, exec.ExecQty)
 		}
-	} else {
-		e.mu.Unlock()
 	}
 
 	go e.attachRiskAfterFill(exec.Symbol, exec.ExecPrice, exec.Side, candidate)
@@ -410,6 +418,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 		Side:      side,
 		MarginUSD: e.cfg.MarginPerTradeUSD,
 		Leverage:  0,
+		Managed:   true,
 		OpenedAt:  time.Now().UTC(),
 		Pending:   true,
 	}
@@ -488,7 +497,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 		pos.OrderID = orderID
 		pos.StopLoss = sl
 		pos.TakeProfit = tp
-		pos.RiskAttached = true
+		pos.RiskAttached = false
 		if pos.Size <= 0 {
 			pos.Pending = true
 		}
@@ -564,7 +573,7 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, price f
 
 	e.mu.Lock()
 	pos, ok := e.positions[symbol]
-	if !ok || pos.Pending || !pos.RiskAttached || pos.StopLoss <= 0 || pos.TakeProfit <= 0 {
+	if !ok || !pos.Managed || pos.Pending || !pos.RiskAttached || pos.StopLoss <= 0 || pos.TakeProfit <= 0 {
 		e.mu.Unlock()
 		return
 	}
@@ -624,8 +633,8 @@ func (e *Engine) LogActivePositions(ctx context.Context) {
 		return
 	}
 	for symbol, pos := range e.positions {
-		log.Printf("[STATE] %s side=%s size=%.8f entry=%.8f pending=%v sl=%.8f tp=%.8f",
-			symbol, pos.Side, pos.Size, pos.EntryPrice, pos.Pending, pos.StopLoss, pos.TakeProfit)
+		log.Printf("[STATE] %s side=%s managed=%v size=%.8f entry=%.8f pending=%v sl=%.8f tp=%.8f",
+			symbol, pos.Side, pos.Managed, pos.Size, pos.EntryPrice, pos.Pending, pos.StopLoss, pos.TakeProfit)
 	}
 }
 
@@ -793,6 +802,7 @@ func (e *Engine) refreshPositions(ctx context.Context) error {
 			MarginUSD:    margin,
 			Leverage:     int(leverage),
 			OpenedAt:     time.Now().UTC(),
+			Managed:      false,
 			RiskAttached: sl > 0 && tp > 0,
 		}
 	}
@@ -848,6 +858,7 @@ func (e *Engine) refreshOpenOrders(ctx context.Context) error {
 				OrderID:   item.OrderID,
 				OpenedAt:  time.Now().UTC(),
 				MarginUSD: e.cfg.MarginPerTradeUSD,
+				Managed:   false,
 				Pending:   true,
 			}
 		} else if e.positions[item.Symbol].Pending {

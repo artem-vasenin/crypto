@@ -37,5 +37,6 @@ type PositionState struct {
 	RiskAttached         bool      `json:"risk_attached"`
 	SnapshotSaved        bool      `json:"snapshot_saved"`
 	RiskAttachInProgress bool      `json:"risk_attach_in_progress"`
+	Managed              bool      `json:"managed"`
 	Pending              bool      `json:"pending"`
 }
