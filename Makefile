@@ -29,12 +29,25 @@ clean:
 
 deploy:
 	@echo "[DEPLOY] Pulling latest code..."
-	git pull origin sail-both-v1
-	@make build
-	@echo "[DEPLOY] Compilation successful. Restarting services..."
-	sudo systemctl stop $(SERVICES)
-	sudo systemctl start $(SERVICES)
+	git pull --ff-only origin sail-both-v1
+
+	@echo "[DEPLOY] Running tests..."
+	@go test ./...
+
+	@echo "[DEPLOY] Building bot..."
+	@go build -ldflags="-s -w" -o $(BINARY_BOT).tmp ./cmd/bot
+
+	@echo "[DEPLOY] Building screener..."
+	@go build -ldflags="-s -w" -o $(BINARY_SCREENER).tmp ./cmd/screener
+
+	@echo "[DEPLOY] Build successful. Installing binaries..."
+	@mv $(BINARY_BOT).tmp $(BINARY_BOT)
+	@mv $(BINARY_SCREENER).tmp $(BINARY_SCREENER)
+
+	@echo "[DEPLOY] Restarting services..."
+	@systemctl restart $(SERVICES)
+
 	@echo "[DEPLOY] Deployment successful!"
 
 status:
-	sudo systemctl status $(SERVICES) --no-pager
+	systemctl status $(SERVICES) --no-pager
