@@ -179,11 +179,65 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	e.mu.Lock()
 	candidate, hasCandidate := e.candidatesCache[exec.Symbol]
 	pos, exists := e.positions[exec.Symbol]
-	riskAttached := exists && pos.RiskAttached
-	e.mu.Unlock()
-
-	if !hasCandidate || !exists || riskAttached {
+	if !exists {
+		e.mu.Unlock()
 		return
+	}
+
+	// The execution side must match the side selected by this bot. A mismatch
+	// means that the local state and the exchange state disagree, so trading
+	// for this symbol is disabled until the situation is investigated.
+	if exec.Side != e.targetSide {
+		e.disabledTokens[exec.Symbol] = true
+		log.Printf("[CRITICAL] execution side mismatch for %s: bot expects %s, exchange execution is %s; symbol disabled",
+			exec.Symbol, e.targetSide, exec.Side)
+		e.mu.Unlock()
+		return
+	}
+
+	riskAttached := pos.RiskAttached
+	riskAttachInProgress := pos.RiskAttachInProgress
+	if !hasCandidate || riskAttached || riskAttachInProgress {
+		e.mu.Unlock()
+		return
+	}
+	pos.RiskAttachInProgress = true
+
+	orderID := exec.OrderID
+	if orderID == "" {
+		orderID = pos.OrderID
+	}
+	leverage := pos.Leverage
+	if !pos.SnapshotSaved {
+		pos.SnapshotSaved = true
+		e.mu.Unlock()
+
+		btcTrend, _ := e.wsEngine.GetBTCTrend15m()
+		if err := SaveTradeSnapshot(
+			exec.Symbol,
+			exec.Side,
+			exec.ExecPrice,
+			exec.ExecQty,
+			leverage,
+			orderID,
+			candidate,
+			btcTrend,
+			exec.ExecFee,
+			exec.ExecID,
+			exec.ExecTime,
+		); err != nil {
+			e.mu.Lock()
+			if current, ok := e.positions[exec.Symbol]; ok {
+				current.SnapshotSaved = false
+			}
+			e.mu.Unlock()
+			log.Printf("[ERROR] failed to save trade snapshot for %s: %v", exec.Symbol, err)
+		} else {
+			log.Printf("[SNAPSHOT] saved entry snapshot for %s %s order=%s exec_price=%.8f exec_qty=%.8f",
+				exec.Symbol, exec.Side, orderID, exec.ExecPrice, exec.ExecQty)
+		}
+	} else {
+		e.mu.Unlock()
 	}
 
 	go e.attachRiskAfterFill(exec.Symbol, exec.ExecPrice, exec.Side, candidate)
@@ -193,19 +247,30 @@ func (e *Engine) attachRiskAfterFill(symbol string, execPrice float64, side stri
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	clearInProgress := func() {
+		e.mu.Lock()
+		if pos, ok := e.positions[symbol]; ok {
+			pos.RiskAttachInProgress = false
+		}
+		e.mu.Unlock()
+	}
+
 	_, _, tickSize, _, _, err := e.getInstrumentLimits(ctx, symbol)
 	if err != nil || tickSize <= 0 {
+		clearInProgress()
 		log.Printf("[ERROR] cannot attach risk for %s: instrument limits unavailable: %v", symbol, err)
 		return
 	}
 
 	sl, tp, costPct, err := e.calculateRiskLevels(side, execPrice, candidate, tickSize)
 	if err != nil {
+		clearInProgress()
 		log.Printf("[ERROR] refusing risk levels for %s: %v", symbol, err)
 		return
 	}
 
 	if err := e.SetTradingStopMarkPrice(ctx, symbol, side, sl, tp, tickSize); err != nil {
+		clearInProgress()
 		log.Printf("[ERROR] failed to attach SL/TP for %s: %v", symbol, err)
 		return
 	}
@@ -215,6 +280,7 @@ func (e *Engine) attachRiskAfterFill(symbol string, execPrice float64, side stri
 		pos.StopLoss = sl
 		pos.TakeProfit = tp
 		pos.RiskAttached = true
+		pos.RiskAttachInProgress = false
 	}
 	e.mu.Unlock()
 
@@ -343,6 +409,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 		Symbol:    candidate.Symbol,
 		Side:      side,
 		MarginUSD: e.cfg.MarginPerTradeUSD,
+		Leverage:  0,
 		OpenedAt:  time.Now().UTC(),
 		Pending:   true,
 	}
@@ -376,6 +443,12 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 	}
 
 	targetLeverage := CalculateDynamicLeverage(candidate, targetStrategy, e.cfg.MaxLeverage)
+	e.mu.Lock()
+	if pos, ok := e.positions[candidate.Symbol]; ok && pos.Pending {
+		pos.Leverage = targetLeverage
+	}
+	e.mu.Unlock()
+
 	qty, err := CalculatePositionQty(
 		e.cfg.MarginPerTradeUSD,
 		targetLeverage,
@@ -577,8 +650,8 @@ func (e *Engine) SetTradingStopMarkPrice(ctx context.Context, symbol, side strin
 	return checkAPIRetCode(body)
 }
 
-func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qty, qtyStep, price, tickSize, sl, tp float64) (string, error) {
-	params := map[string]interface{}{
+func buildPostOnlyOrderParams(symbol, side string, qty, qtyStep, price, tickSize, sl, tp float64) map[string]interface{} {
+	return map[string]interface{}{
 		"category":    "linear",
 		"symbol":      symbol,
 		"side":        side,
@@ -588,8 +661,18 @@ func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qt
 		"timeInForce": "PostOnly",
 		"positionIdx": 0,
 		"reduceOnly":  false,
+		"takeProfit":  FormatStep(tp, tickSize),
+		"stopLoss":    FormatStep(sl, tickSize),
+		"tpTriggerBy": "MarkPrice",
+		"slTriggerBy": "MarkPrice",
+		"tpslMode":    "Full",
+		"tpOrderType": "Market",
+		"slOrderType": "Market",
 	}
+}
 
+func (e *Engine) placePostOnlyOrder(ctx context.Context, symbol, side string, qty, qtyStep, price, tickSize, sl, tp float64) (string, error) {
+	params := buildPostOnlyOrderParams(symbol, side, qty, qtyStep, price, tickSize, sl, tp)
 	body, err := e.doSignedPOST(ctx, "/v5/order/create", params, symbol)
 	if err != nil {
 		return "", err
@@ -708,6 +791,7 @@ func (e *Engine) refreshPositions(ctx context.Context) error {
 			StopLoss:     sl,
 			TakeProfit:   tp,
 			MarginUSD:    margin,
+			Leverage:     int(leverage),
 			OpenedAt:     time.Now().UTC(),
 			RiskAttached: sl > 0 && tp > 0,
 		}

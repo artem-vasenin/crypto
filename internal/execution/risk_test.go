@@ -61,3 +61,36 @@ func TestCalculateDynamicLeverage(t *testing.T) {
 		t.Fatalf("expected reduced leverage in high volatility, got %d", got)
 	}
 }
+
+func TestNewEngineTargetSide(t *testing.T) {
+	cfg := models.BotConfig{ApiKey: "key", ApiSecret: "secret"}
+	if got := NewEngine(cfg, "short").targetSide; got != "Sell" {
+		t.Fatalf("short strategy must target Sell, got %q", got)
+	}
+	if got := NewEngine(cfg, "long").targetSide; got != "Buy" {
+		t.Fatalf("long strategy must target Buy, got %q", got)
+	}
+}
+
+func TestBuildPostOnlyOrderParams(t *testing.T) {
+	params := buildPostOnlyOrderParams("BTCUSDT", "Sell", 10, 0.1, 100.1, 0.1, 102.2, 96.6)
+
+	if params["side"] != "Sell" {
+		t.Fatalf("expected Sell side, got %v", params["side"])
+	}
+	if params["timeInForce"] != "PostOnly" {
+		t.Fatalf("expected PostOnly, got %v", params["timeInForce"])
+	}
+	if params["takeProfit"] != "96.6" {
+		t.Fatalf("unexpected TP: %v", params["takeProfit"])
+	}
+	if params["stopLoss"] != "102.2" {
+		t.Fatalf("unexpected SL: %v", params["stopLoss"])
+	}
+	if params["tpslMode"] != "Full" {
+		t.Fatalf("expected Full TP/SL mode, got %v", params["tpslMode"])
+	}
+	if params["tpOrderType"] != "Market" || params["slOrderType"] != "Market" {
+		t.Fatal("Full TP/SL must use Market trigger orders")
+	}
+}

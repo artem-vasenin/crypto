@@ -21,11 +21,14 @@ type TradeSnapshot struct {
 	Leverage        int              `json:"leverage"`
 	OrderID         string           `json:"order_id"`
 	ExecutionReason string           `json:"execution_reason"`
+	ExecutionFee    float64          `json:"execution_fee"`
+	ExecutionID     string           `json:"execution_id"`
+	ExecutionTime   time.Time        `json:"execution_time"`
 	Candidate       models.Candidate `json:"candidate_metrics"`
 	BTC15mTrendPct  float64          `json:"btc_15m_trend_pct"`
 }
 
-func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, orderID string, candidate models.Candidate, btcTrendPct float64) error {
+func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, orderID string, candidate models.Candidate, btcTrendPct, executionFee float64, executionID string, executionTime time.Time) error {
 	exePath, err := os.Executable()
 	baseDir := "."
 	if err == nil {
@@ -56,6 +59,9 @@ func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, or
 		Leverage:        leverage,
 		OrderID:         orderID,
 		ExecutionReason: execReason,
+		ExecutionFee:    executionFee,
+		ExecutionID:     executionID,
+		ExecutionTime:   executionTime,
 		Candidate:       candidate,
 		BTC15mTrendPct:  btcTrendPct,
 	}

@@ -261,6 +261,7 @@ Bybit
 - entry;
 - размер;
 - зарезервированная маржа;
+- фактическое leverage позиции;
 - SL/TP;
 - extrema для trailing;
 - состояние pending;
@@ -821,8 +822,11 @@ Fallback для установки SL/TP после фактического fil
 ### `SetTradingStopMarkPrice`
 Устанавливает full-position TP/SL через Bybit `trading-stop`.
 
+### `buildPostOnlyOrderParams`
+Строит и форматирует параметры Bybit для открытия позиции. Проверяет тестами, что сторона, PostOnly, TP/SL и Full TP/SL mode передаются согласованно.
+
 ### `placePostOnlyOrder`
-Выставляет Limit/PostOnly заявку. В исправленной версии TP/SL передаются уже при создании заявки.
+Выставляет Limit/PostOnly заявку. TP/SL передаются уже при создании заявки с `tpslMode=Full`, `MarkPrice` и рыночным исполнением TP/SL. После фактического fill движок дополнительно выполняет `trading-stop`, пересчитывая уровни от реальной цены исполнения.
 
 ### `cancelOrder`
 Отменяет зависшую заявку.
@@ -943,7 +947,8 @@ Fallback для установки SL/TP после фактического fil
 - fallback при отсутствии pivot;
 - rejection при недостаточном min notional;
 - TP;
-- динамическое снижение leverage.
+- динамическое снижение leverage;
+- корректность параметров PostOnly + TP/SL заявки.
 
 ---
 
@@ -1037,7 +1042,21 @@ macOS metadata-файл. На работу проекта не влияет. В 
 
 ---
 
-# 6. Важное ограничение
+# 6. Проверка исправленной версии
+
+Production-архив сохраняет `go 1.26.5`. В среде подготовки архива Go 1.26.5 был недоступен, поэтому полный набор `go test ./...` дополнительно прогонялся на Go 1.23.2 с локальными compile-only заглушками только для `gorilla/websocket` и `godotenv`. Все пакеты и unit-тесты прошли. Заглушки в production-архив не входят.
+
+Дополнительно проверено статически:
+- `PositionState` содержит `Leverage`, который используется execution engine;
+- `short` всегда соответствует `Sell`, `long` — `Buy`;
+- PostOnly для Buy ставится по bid, для Sell — по ask;
+- TP/SL передаются в `/v5/order/create`;
+- Full TP/SL использует market trigger orders;
+- snapshot создаётся только после execution event и защищён от повторной записи;
+- execution с неправильной стороной блокирует символ;
+- Unified Account balance читается через `totalAvailableBalance`.
+
+# 7. Важное ограничение
 
 Это исправленная и существенно более безопасная версия исходного проекта, но это всё ещё не production-grade торговая система.
 
@@ -1055,3 +1074,39 @@ macOS metadata-файл. На работу проекта не влияет. В 
 - реальные min/max order quantities.
 
 Особенно важно не считать наличие unit-тестов доказательством корректности реальной торговли: unit-тесты не могут проверить внешний matching engine Bybit.
+
+# 8. Дополнение после практической проверки execution
+
+## `internal/execution/snapshot_logger.go` — уточнение
+
+`SaveTradeSnapshot` вызывается из execution lifecycle только после подтверждённого события `execution` от Bybit. Создание PostOnly-заявки само по себе snapshot не создаёт.
+
+Сохраняемые дополнительные данные:
+- фактическая комиссия исполнения;
+- `execution_id`;
+- фактическое время исполнения;
+- фактические цена и количество исполнения;
+- order ID;
+- leverage;
+- полный screening `Candidate`.
+
+## `internal/execution/ws_engine.go` — уточнение
+
+`ExecutionLog` теперь также содержит `OrderID`, полученный из private execution stream. Это позволяет однозначно связать фактический fill с заявкой, которая его породила.
+
+## `internal/execution/engine.go` — уточнение
+
+`handleExecutionWS` выполняет три важных действия:
+
+1. Отбрасывает дубликаты execution по `ExecID`.
+2. Проверяет, что сторона фактического исполнения совпадает со стороной, для которой запущен бот.
+3. При первом фактическом входе сохраняет immutable entry snapshot и запускает установку SL/TP.
+
+При несовпадении направления (`short`/`Sell` ожидает `Buy` и наоборот) символ помещается в `disabledTokens`, а в лог пишется критическая ошибка.
+
+## `models/execution.go` — уточнение
+
+`PositionState` дополнительно хранит:
+
+- `Leverage` — leverage конкретной позиции;
+- `SnapshotSaved` — защита от повторного создания entry snapshot при нескольких execution events, например при partial fills.

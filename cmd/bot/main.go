@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -87,8 +88,9 @@ func main() {
 	}
 	engine.LogActivePositions(ctx)
 
-	log.Printf("[INFO] Bot active | strategy=%s margin=$%.2f max_margin=$%.2f max_positions=%d leverage<=x%d testnet=%v",
+	log.Printf("[INFO] Bot active | strategy=%s target_side=%s margin=$%.2f max_margin=$%.2f max_positions=%d leverage<=x%d testnet=%v",
 		*strategyName,
+		map[bool]string{true: "Buy", false: "Sell"}[strings.EqualFold(*strategyName, "long")],
 		botCfg.MarginPerTradeUSD,
 		botCfg.MaxTotalMarginUSD,
 		botCfg.MaxActivePositions,

@@ -26,6 +26,7 @@ type ExecutionLog struct {
 	ClosedSize float64   `json:"closedSize"`
 	ExecTime   time.Time `json:"execTime"`
 	ExecID     string    `json:"execId"`
+	OrderID    string    `json:"orderId"`
 }
 
 type PositionUpdate struct {
@@ -406,6 +407,7 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 			ClosedSize string `json:"closedSize"`
 			ExecTime   string `json:"execTime"`
 			ExecID     string `json:"execId"`
+			OrderID    string `json:"orderId"`
 		}
 		if json.Unmarshal(base.Data, &data) != nil {
 			return
@@ -428,6 +430,7 @@ func (w *WSEngine) parsePrivateMessage(message []byte) {
 					ClosedSize: closed,
 					ExecTime:   time.UnixMilli(ms).UTC(),
 					ExecID:     item.ExecID,
+					OrderID:    item.OrderID,
 				})
 			}
 		}
