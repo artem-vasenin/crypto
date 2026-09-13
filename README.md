@@ -287,3 +287,171 @@ Trailing больше не активируется сразу после fill. 
 Это предотвращает ситуацию, когда первый тик после исполнения заменяет структурный SL на слишком близкий trailing SL. Например, при entry 100 и исходном SL 95 trailing 1% не должен становиться активным на цене 102; активация начинается от 105.
 
 Это исследовательское правило и не является доказанным оптимальным параметром.
+
+-----------------------
+
+# Deploy
+
+### 1. Скринеры
+
+Остановить оба
+
+```bash
+systemctl stop screener-long screener-short
+```
+
+Запустить оба
+
+```bash
+systemctl start screener-long screener-short
+```
+
+Перезапустить оба
+
+```bash
+systemctl restart screener-long screener-short
+```
+
+Посмотреть статус обоих
+
+```bash
+systemctl status screener-long screener-short --no-pager
+```
+
+Посмотреть статус конкретного
+
+```bash
+systemctl status screener-long --no-pager
+```
+
+или:
+
+```bash
+systemctl status screener-short --no-pager
+```
+
+⸻
+
+### 2. Боты
+
+Остановить оба
+
+```bash
+systemctl stop bot-long bot-short
+```
+
+Запустить оба
+
+```bash
+systemctl start bot-long bot-short
+```
+
+Перезапустить оба
+
+```bash
+systemctl restart bot-long bot-short
+```
+
+Посмотреть статус обоих
+
+```bash
+systemctl status bot-long bot-short --no-pager
+```
+
+Посмотреть конкретный
+
+```bash
+systemctl status bot-long --no-pager
+```
+
+или:
+
+```bash
+systemctl status bot-short --no-pager
+```
+
+⸻
+
+### 3. Логи ботов
+
+Последние 100 строк обоих ботов
+
+```bash
+journalctl -u bot-long -u bot-short -n 100 --no-pager
+```
+
+Логи конкретного бота
+
+Long:
+
+```bash
+journalctl -u bot-long -n 100 --no-pager
+```
+
+Short:
+
+```bash
+journalctl -u bot-short -n 100 --no-pager
+```
+
+Смотреть логи в реальном времени
+
+```bash
+journalctl -u bot-long -f
+```
+
+Для short:
+
+```bash
+journalctl -u bot-short -f
+```
+
+Логи обоих ботов в реальном времени
+
+```bash
+journalctl -u bot-long -u bot-short -f
+```
+⸻
+
+4. Очень полезные дополнительные команды
+
+Посмотреть, работают ли все 4 сервиса
+
+```bash
+systemctl status screener-long screener-short bot-long bot-short --no-pager
+```
+
+Быстро увидеть только состояние
+
+```bash
+systemctl is-active screener-long screener-short bot-long bot-short
+```
+
+Посмотреть последние 30 минут логов ботов
+
+```bash
+journalctl -u bot-long -u bot-short --since "30 minutes ago" --no-pager
+```
+
+Посмотреть ошибки ботов
+
+```bash
+journalctl -u bot-long -u bot-short -p err --since "1 hour ago" --no-pager
+```
+⸻
+
+Я бы себе сохранил вот эту небольшую шпаргалку
+
+# === SCREENER ===
+systemctl stop screener-long screener-short
+systemctl start screener-long screener-short
+systemctl restart screener-long screener-short
+systemctl status screener-long screener-short --no-pager
+# === BOT ===
+systemctl stop bot-long bot-short
+systemctl start bot-long bot-short
+systemctl restart bot-long bot-short
+systemctl status bot-long bot-short --no-pager
+# === BOT LOGS ===
+journalctl -u bot-long -u bot-short -n 100 --no-pager
+journalctl -u bot-long -u bot-short -f
