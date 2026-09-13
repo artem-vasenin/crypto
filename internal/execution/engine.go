@@ -220,7 +220,7 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 	e.mu.Unlock()
 
 	if snapshotNeeded {
-		btcTrend, _ := e.wsEngine.GetBTCTrend15m()
+		btcTrend, btcTrendOK := e.wsEngine.GetBTCTrend15m()
 		if err := SaveTradeSnapshot(
 			exec.Symbol,
 			exec.Side,
@@ -230,6 +230,7 @@ func (e *Engine) handleExecutionWS(exec ExecutionLog) {
 			orderID,
 			candidate,
 			btcTrend,
+			btcTrendOK,
 			exec.ExecFee,
 			exec.ExecID,
 			exec.ExecTime,
@@ -544,12 +545,23 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, price f
 		return
 	}
 
+	// Do not activate trailing immediately after entry. The first ticker can be
+	// equal to (or only a few ticks above) the entry and an immediate 1%
+	// trailing stop would silently replace a structurally calculated stop with
+	// a much tighter one. Activate trailing only after the position reaches 1R.
+	initialRisk := math.Abs(pos.EntryPrice - pos.StopLoss)
+	if initialRisk <= 0 {
+		e.mu.Unlock()
+		return
+	}
+
 	var newSL float64
 	if pos.Side == "Buy" {
-		if price > pos.HighestPrice {
-			pos.HighestPrice = price
+		if price < pos.EntryPrice+initialRisk {
+			e.mu.Unlock()
+			return
 		}
-		if pos.HighestPrice <= 0 {
+		if price > pos.HighestPrice {
 			pos.HighestPrice = price
 		}
 		newSL = pos.HighestPrice * (1 - e.cfg.TrailingPct/100)
@@ -558,6 +570,10 @@ func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, price f
 			return
 		}
 	} else {
+		if price > pos.EntryPrice-initialRisk {
+			e.mu.Unlock()
+			return
+		}
 		if pos.LowestPrice == 0 || price < pos.LowestPrice {
 			pos.LowestPrice = price
 		}

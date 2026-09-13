@@ -25,10 +25,9 @@ type TradeSnapshot struct {
 	ExecutionID     string           `json:"execution_id"`
 	ExecutionTime   time.Time        `json:"execution_time"`
 	Candidate       models.Candidate `json:"candidate_metrics"`
-	BTC15mTrendPct  float64          `json:"btc_15m_trend_pct"`
 }
 
-func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, orderID string, candidate models.Candidate, btcTrendPct, executionFee float64, executionID string, executionTime time.Time) error {
+func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, orderID string, candidate models.Candidate, btcTrendPct float64, btcTrendOK bool, executionFee float64, executionID string, executionTime time.Time) error {
 	exePath, err := os.Executable()
 	baseDir := "."
 	if err == nil {
@@ -49,6 +48,9 @@ func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, or
 	if st, ok := candidate.Strategies[stratKey]; ok {
 		execReason = st.Reason
 	}
+	if btcTrendOK {
+		candidate.Indicators.BTC15mTrendPct = &btcTrendPct
+	}
 
 	snap := TradeSnapshot{
 		Timestamp:       time.Now().UTC(),
@@ -63,7 +65,6 @@ func SaveTradeSnapshot(symbol, side string, price, qty float64, leverage int, or
 		ExecutionID:     executionID,
 		ExecutionTime:   executionTime,
 		Candidate:       candidate,
-		BTC15mTrendPct:  btcTrendPct,
 	}
 
 	orderPart := orderID

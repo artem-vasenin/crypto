@@ -324,8 +324,12 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, ticker mo
 
 	if ticker.LastPrice > 0 {
 		ind.ATR5mPct = ind.ATR5m / ticker.LastPrice * 100
+		ind.ATR15mPct = ind.ATR15m / ticker.LastPrice * 100
 		ind.ATR1hPct = ind.ATR1h / ticker.LastPrice * 100
 		ind.ATR4hPct = ind.ATR4h / ticker.LastPrice * 100
+		if ema := indicators.EMA(c15, 10); ema > 0 {
+			ind.PriceVsEMA10_15m = (ticker.LastPrice - ema) / ema * 100
+		}
 	}
 
 	structures := map[string]models.Structure{
@@ -366,6 +370,7 @@ func (s *Service) analyze(ctx context.Context, inst models.Instrument, ticker mo
 	candidate.Market.Volume24h = ticker.Volume24h
 	candidate.Market.SpreadPct = der.SpreadPct
 	candidate.Indicators = ind
+	candidate.Context = buildMarketContext(structures, ticker.LastPrice)
 	candidate.Structure = structures
 	candidate.Levels = levels
 	candidate.Derivatives = der

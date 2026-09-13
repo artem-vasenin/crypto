@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -127,4 +128,25 @@ func TestCalculateRiskLevelsForShort(t *testing.T) {
 	if sl <= 100 || tp >= 100 {
 		t.Fatalf("invalid short levels: SL=%.2f TP=%.2f", sl, tp)
 	}
+}
+
+func TestTrailingActivationRequiresOneR(t *testing.T) {
+	engine := &Engine{
+		cfg: models.BotConfig{TrailingPct: 1},
+		positions: map[string]*models.PositionState{
+			"TESTUSDT": {
+				Symbol: "TESTUSDT", Side: "Buy", EntryPrice: 100, StopLoss: 95, TakeProfit: 110,
+				Managed: true, RiskAttached: true, Size: 1,
+			},
+		},
+	}
+
+	engine.UpdateTrailingStops(context.Background(), "TESTUSDT", 102)
+	if got := engine.positions["TESTUSDT"].StopLoss; got != 95 {
+		t.Fatalf("trailing must not activate before 1R, got SL %.4f", got)
+	}
+
+	// The helper calls the exchange, so this test intentionally stops at the
+	// activation gate. A second integration test should cover the actual API
+	// update against a mocked client.
 }

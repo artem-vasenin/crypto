@@ -64,7 +64,7 @@ type WSEngine struct {
 	privConnMu sync.Mutex
 
 	btcBase15mPrice float64
-	lastBTCReset    time.Time
+	btc15mBucket    time.Time
 }
 
 func NewWSEngine(
@@ -85,7 +85,6 @@ func NewWSEngine(
 		onBalanceUpdate: onBalanceUpdate,
 		prices:          make(map[string]float64),
 		subscribed:      make(map[string]bool),
-		lastBTCReset:    time.Now(),
 	}
 }
 
@@ -189,10 +188,12 @@ func (w *WSEngine) parsePublicMessage(message []byte) {
 
 	w.mu.Lock()
 	w.prices[data.Symbol] = price
-	if data.Symbol == "BTCUSDT" &&
-		(w.btcBase15mPrice == 0 || time.Since(w.lastBTCReset) >= 15*time.Minute) {
-		w.btcBase15mPrice = price
-		w.lastBTCReset = time.Now()
+	if data.Symbol == "BTCUSDT" {
+		bucket := time.Now().UTC().Truncate(15 * time.Minute)
+		if w.btcBase15mPrice == 0 || !bucket.Equal(w.btc15mBucket) {
+			w.btcBase15mPrice = price
+			w.btc15mBucket = bucket
+		}
 	}
 	w.mu.Unlock()
 }

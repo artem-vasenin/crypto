@@ -133,3 +133,17 @@ func VolumeTrend(candles []models.Candle, shortPeriod, longPeriod int) float64 {
 
 	return (shortAvg/longAvg - 1.0) * 100.0
 }
+
+// EMA returns the exponential moving average of closed candle closes.
+func EMA(candles []models.Candle, period int) float64 {
+	if period <= 0 || len(candles) < period {
+		return 0
+	}
+	start := len(candles) - period
+	ema := candles[start].Close
+	alpha := 2.0 / float64(period+1)
+	for i := start + 1; i < len(candles); i++ {
+		ema = (candles[i].Close-ema)*alpha + ema
+	}
+	return ema
+}

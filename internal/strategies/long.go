@@ -1,6 +1,11 @@
 package strategies
 
-import "universal-bybit-screener/models"
+import (
+	"fmt"
+	"math"
+
+	"universal-bybit-screener/models"
+)
 
 type Long struct{}
 
@@ -10,16 +15,37 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 	scores := evaluateDirectionalBlocks(c, 1)
 	eligible, reasons := directionalEligibility(scores, "long")
 
-	// A bullish short-term setup is not enough to override a contradictory
-	// higher-timeframe structure. TrendQuality is deliberately the first gate.
-	if c.Structure["1h"].HighState == "LH" && c.Structure["1h"].LowState == "LL" {
+	st1 := c.Structure["1h"]
+	st4 := c.Structure["4h"]
+
+	if isBearish(st1) {
 		eligible = false
 		reasons = append(reasons, "long blocked: 1h structure is bearish (LH+LL)")
 	}
-	if c.Structure["4h"].HighState == "LH" && c.Structure["4h"].LowState == "LL" {
+	if isBearish(st4) {
 		eligible = false
 		reasons = append(reasons, "long blocked: 4h structure is bearish (LH+LL)")
 	}
+	if isConflict(st1) {
+		eligible = false
+		reasons = append(reasons, "long blocked: 1h structure is conflicting (HH+LL/LH+HL)")
+	}
+	if isConflict(st4) {
+		eligible = false
+		reasons = append(reasons, "long blocked: 4h structure is conflicting (HH+LL/LH+HL)")
+	}
+
+	// A late long after a strong impulse is especially vulnerable to a normal
+	// pullback. Do not enter when price is very close to a local resistance and
+	// the 15m RSI is already stretched. This is a gate, not a score bonus.
+	if c.Context.LocalResistance > 0 &&
+		c.Context.DistanceToLocalResistancePct <= math.Max(0.5*c.Indicators.ATR1hPct, 0.25) &&
+		c.Indicators.RSI15m >= 68 &&
+		c.Market.Change24h >= 5 {
+		eligible = false
+		reasons = append(reasons, fmt.Sprintf("long blocked: late entry %.2f%% below local resistance with 15m RSI %.1f", c.Context.DistanceToLocalResistancePct, c.Indicators.RSI15m))
+	}
+
 	if c.Indicators.ATR1hPct > 5 || c.Market.SpreadPct > 0.15 {
 		eligible = false
 		reasons = append(reasons, "long blocked: extreme volatility or spread")
@@ -43,4 +69,12 @@ func (Long) Evaluate(c *models.Candidate) models.StrategyResult {
 		Status: status,
 		Reason: decisionReason(eligible, reasons, "long"),
 	}
+}
+
+func isBullish(st models.Structure) bool {
+	return st.HighState == "HH" && st.LowState == "HL"
+}
+
+func isBearish(st models.Structure) bool {
+	return st.HighState == "LH" && st.LowState == "LL"
 }

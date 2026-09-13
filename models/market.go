@@ -57,21 +57,22 @@ type FundingPoint struct {
 }
 
 type Indicators struct {
-	RSI5m            float64 `json:"rsi_5m"`
-	RSI15m           float64 `json:"rsi_15m"`
-	RSI1h            float64 `json:"rsi_1h"`
-	RSI4h            float64 `json:"rsi_4h"`
-	ATR5m            float64 `json:"atr_5m"`
-	ATR15m           float64 `json:"atr_15m"`
-	ATR1h            float64 `json:"atr_1h"`
-	ATR4h            float64 `json:"atr_4h"`
-	ATR5mPct         float64 `json:"atr_5m_pct"`
-	ATR1hPct         float64 `json:"atr_1h_pct"`
-	ATR4hPct         float64 `json:"atr_4h_pct"`
-	VolumeRatio1h    float64 `json:"volume_ratio_1h"`
-	VolumeTrend1h    float64 `json:"volume_trend_1h"`
-	PriceVsEMA10_15m float64 `json:"price_vs_ema10_15m_pct"`
-	BTC15mTrendPct   float64 `json:"btc_15m_trend_pct"`
+	RSI5m            float64  `json:"rsi_5m"`
+	RSI15m           float64  `json:"rsi_15m"`
+	RSI1h            float64  `json:"rsi_1h"`
+	RSI4h            float64  `json:"rsi_4h"`
+	ATR5m            float64  `json:"atr_5m"`
+	ATR15m           float64  `json:"atr_15m"`
+	ATR15mPct        float64  `json:"atr_15m_pct"`
+	ATR1h            float64  `json:"atr_1h"`
+	ATR4h            float64  `json:"atr_4h"`
+	ATR5mPct         float64  `json:"atr_5m_pct"`
+	ATR1hPct         float64  `json:"atr_1h_pct"`
+	ATR4hPct         float64  `json:"atr_4h_pct"`
+	VolumeRatio1h    float64  `json:"volume_ratio_1h"`
+	VolumeTrend1h    float64  `json:"volume_trend_1h"`
+	PriceVsEMA10_15m float64  `json:"price_vs_ema10_15m_pct"`
+	BTC15mTrendPct   *float64 `json:"btc_15m_trend_pct"`
 }
 
 type Pivot struct {
@@ -138,6 +139,14 @@ type StrategyDecision struct {
 	BlockingReasons []string `json:"blocking_reasons,omitempty"`
 }
 
+type MarketContext struct {
+	Direction                    string  `json:"direction"`
+	Regime                       string  `json:"regime"`
+	HTFConflict                  bool    `json:"htf_conflict"`
+	LocalResistance              float64 `json:"local_resistance"`
+	DistanceToLocalResistancePct float64 `json:"distance_to_local_resistance_pct"`
+}
+
 type StrategyResult struct {
 	Scores   AnalysisScores   `json:"scores"`
 	Decision StrategyDecision `json:"decision"`
@@ -157,6 +166,7 @@ type Candidate struct {
 		SpreadPct   float64 `json:"spread_pct"`
 	} `json:"market"`
 	Indicators  Indicators                `json:"indicators"`
+	Context     MarketContext             `json:"context"`
 	Structure   map[string]Structure      `json:"structure"`
 	Levels      Levels                    `json:"levels"`
 	Derivatives Derivatives               `json:"derivatives"`

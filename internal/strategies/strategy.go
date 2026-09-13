@@ -84,6 +84,11 @@ func status(score float64) string {
 	}
 }
 
+func isConflict(st models.Structure) bool {
+	return (st.HighState == "HH" && st.LowState == "LL") ||
+		(st.HighState == "LH" && st.LowState == "HL")
+}
+
 func structureDirection(st models.Structure) int {
 	if st.HighState == "HH" && st.LowState == "HL" {
 		return 1
@@ -100,6 +105,11 @@ func directionalStructureScore(st models.Structure, side int) float64 {
 	case dir == side:
 		return 100
 	case dir == 0:
+		// A conflict (HH+LL / LH+HL) is not half-directional. It is an
+		// unreliable structure and must not be rewarded by the score.
+		if isConflict(st) {
+			return 0
+		}
 		return 50
 	default:
 		return 0

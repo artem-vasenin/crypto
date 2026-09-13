@@ -521,3 +521,61 @@ collect new sample
 ```
 
 Нужно накапливать выборку, а не подгонять стратегию под 1–2 сделки.
+
+---
+
+# 6. Market Context
+
+Перед directional decision кандидат получает дополнительный контекст:
+
+```text
+Market Context
+├── direction
+│   ├── bullish
+│   ├── bearish
+│   ├── conflict
+│   └── neutral
+│
+├── regime
+│   ├── trend
+│   ├── expansion
+│   └── uncertain
+│
+├── HTF conflict
+└── local resistance / distance
+```
+
+`HH+LL` и `LH+HL` считаются конфликтующими структурами. Они не превращаются в среднее значение `50`.
+
+Для текущего research-режима конфликт на 1h/4h блокирует directional long/short. Позже можно отдельно исследовать breakout/expansion как самостоятельный режим, но пока не следует смешивать его с обычным trend-following.
+
+Локальное сопротивление для entry context берётся из pivot 5m/15m/30m. HTF `Levels.NearestSupport/Resistance` остаются отдельными и продолжают использоваться для расчёта структурного SL/TP.
+
+---
+
+# 7. Trailing lifecycle
+
+После fill:
+
+```text
+ENTRY
+  │
+  ├── initial structural SL
+  │
+  ├── price has not reached +1R
+  │       └── trailing inactive
+  │
+  └── price reaches +1R
+          │
+          └── trailing becomes active
+```
+
+Trailing не должен сужать первоначальный структурный стоп сразу после открытия позиции.
+
+---
+
+# 8. Derived indicator fields
+
+`price_vs_ema10_15m_pct` рассчитывается по EMA10 закрытых 15m свечей.
+
+Поля, для которых достоверное значение отсутствует, не должны использоваться как подтверждённый сигнал. BTC 15m trend в trade snapshot является nullable: если public ticker stream ещё не дал пригодного значения, JSON содержит `null`, а не ложный `0`.

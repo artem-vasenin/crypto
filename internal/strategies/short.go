@@ -10,14 +10,26 @@ func (Short) Evaluate(c *models.Candidate) models.StrategyResult {
 	scores := evaluateDirectionalBlocks(c, -1)
 	eligible, reasons := directionalEligibility(scores, "short")
 
-	if c.Structure["1h"].HighState == "HH" && c.Structure["1h"].LowState == "HL" {
+	st1 := c.Structure["1h"]
+	st4 := c.Structure["4h"]
+
+	if isBullish(st1) {
 		eligible = false
 		reasons = append(reasons, "short blocked: 1h structure is bullish (HH+HL)")
 	}
-	if c.Structure["4h"].HighState == "HH" && c.Structure["4h"].LowState == "HL" {
+	if isBullish(st4) {
 		eligible = false
 		reasons = append(reasons, "short blocked: 4h structure is bullish (HH+HL)")
 	}
+	if isConflict(st1) {
+		eligible = false
+		reasons = append(reasons, "short blocked: 1h structure is conflicting (HH+LL/LH+HL)")
+	}
+	if isConflict(st4) {
+		eligible = false
+		reasons = append(reasons, "short blocked: 4h structure is conflicting (HH+LL/LH+HL)")
+	}
+
 	if c.Indicators.ATR1hPct > 5 || c.Market.SpreadPct > 0.15 {
 		eligible = false
 		reasons = append(reasons, "short blocked: extreme volatility or spread")

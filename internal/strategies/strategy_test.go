@@ -92,3 +92,42 @@ func TestShortCanBeEligibleWhenBlocksAlign(t *testing.T) {
 		t.Fatalf("expected short eligibility, got %+v", result)
 	}
 }
+
+func TestConflictingStructureIsNotScoredAsHalfDirectional(t *testing.T) {
+	st := models.Structure{HighState: "HH", LowState: "LL"}
+	if got := directionalStructureScore(st, 1); got != 0 {
+		t.Fatalf("expected conflicting structure to score 0, got %.0f", got)
+	}
+}
+
+func TestLongRejectsLateEntryNearLocalResistance(t *testing.T) {
+	candidate := models.Candidate{}
+	candidate.Market.Change24h = 8
+	candidate.Market.Change3d = 3
+	candidate.Market.Change7d = 2
+	candidate.Market.Turnover24h = 50_000_000
+	candidate.Market.SpreadPct = 0.02
+	candidate.Indicators.RSI5m = 65
+	candidate.Indicators.RSI15m = 70
+	candidate.Indicators.RSI1h = 62
+	candidate.Indicators.RSI4h = 55
+	candidate.Indicators.ATR1hPct = 2
+	candidate.Indicators.VolumeRatio1h = 1
+	candidate.Levels.RangePositionPct = 25
+	candidate.OrderBook.ImbalancePct = 5
+	candidate.Derivatives.OpenInterestChange = 1
+	candidate.Structure = map[string]models.Structure{
+		"5m":  {HighState: "HH", LowState: "HL"},
+		"15m": {HighState: "HH", LowState: "HL"},
+		"30m": {HighState: "HH", LowState: "HL"},
+		"1h":  {HighState: "HH", LowState: "HL"},
+		"4h":  {HighState: "HH", LowState: "HL"},
+	}
+	candidate.Context.LocalResistance = 101
+	candidate.Context.DistanceToLocalResistancePct = 0.4
+
+	result := Long{}.Evaluate(&candidate)
+	if result.Decision.Eligible {
+		t.Fatalf("expected late long entry rejection, got %+v", result)
+	}
+}
