@@ -1,7 +1,6 @@
 package execution
 
 import (
-	"context"
 	"math"
 	"testing"
 
@@ -130,23 +129,66 @@ func TestCalculateRiskLevelsForShort(t *testing.T) {
 	}
 }
 
-func TestTrailingActivationRequiresOneR(t *testing.T) {
-	engine := &Engine{
-		cfg: models.BotConfig{TrailingPct: 1},
-		positions: map[string]*models.PositionState{
-			"TESTUSDT": {
-				Symbol: "TESTUSDT", Side: "Buy", EntryPrice: 100, StopLoss: 95, TakeProfit: 110,
-				Managed: true, RiskAttached: true, Size: 1,
-			},
-		},
+func TestCalculateTrailingStopRequiresOneR(t *testing.T) {
+	newSL, extreme, active, reason := CalculateTrailingStop("Buy", 100, 95, 102, 0, 1, 0.2, 0.1)
+	if active || newSL != 0 || extreme != 0 || reason != "activation_not_reached" {
+		t.Fatalf("unexpected inactive result: sl=%.4f extreme=%.4f active=%v reason=%s", newSL, extreme, active, reason)
 	}
 
-	engine.UpdateTrailingStops(context.Background(), "TESTUSDT", 102)
-	if got := engine.positions["TESTUSDT"].StopLoss; got != 95 {
-		t.Fatalf("trailing must not activate before 1R, got SL %.4f", got)
+	newSL, extreme, active, reason = CalculateTrailingStop("Buy", 100, 95, 105, 0, 1, 0.2, 0.1)
+	if !active || newSL != 103.9 || extreme != 105 || reason != "new_extreme" {
+		t.Fatalf("unexpected active result: sl=%.4f extreme=%.4f active=%v reason=%s", newSL, extreme, active, reason)
+	}
+}
+
+func TestCalculateTrailingStopIgnoresMicroMove(t *testing.T) {
+	newSL, extreme, active, reason := CalculateTrailingStop("Sell", 100, 105, 94, 94, 1, 0.2, 0.01)
+	if !active || newSL <= 0 || extreme != 94 || reason != "new_extreme" {
+		t.Fatalf("unexpected first trailing result: sl=%.4f extreme=%.4f active=%v reason=%s", newSL, extreme, active, reason)
 	}
 
-	// The helper calls the exchange, so this test intentionally stops at the
-	// activation gate. A second integration test should cover the actual API
-	// update against a mocked client.
+	newSL, extreme, active, reason = CalculateTrailingStop("Sell", 100, newSL, 93.95, extreme, 1, 0.2, 0.01)
+	if !active || extreme != 93.95 || reason != "sl_move_too_small" {
+		t.Fatalf("micro move must not move SL: sl=%.4f extreme=%.4f active=%v reason=%s", newSL, extreme, active, reason)
+	}
+}
+
+func TestCalculateTrailingStopNeverWorsensSL(t *testing.T) {
+	newSL, _, active, reason := CalculateTrailingStop("Buy", 100, 104, 106, 106, 1, 0, 0.01)
+	if !active || newSL <= 104 || reason != "new_extreme" {
+		t.Fatalf("long trailing should improve SL: sl=%.4f active=%v reason=%s", newSL, active, reason)
+	}
+
+	newSL, _, active, reason = CalculateTrailingStop("Sell", 100, 96, 94, 94, 1, 0, 0.01)
+	if !active || newSL >= 96 || reason != "new_extreme" {
+		t.Fatalf("short trailing should improve SL: sl=%.4f active=%v reason=%s", newSL, active, reason)
+	}
+}
+
+func TestHandlePositionUpdateMarksTargetSideAsManaged(t *testing.T) {
+	engine := NewEngine(models.BotConfig{}, "short")
+	engine.handlePositionUpdateWS(PositionUpdate{
+		Symbol:     "TESTUSDT",
+		Side:       "Sell",
+		Size:       1,
+		EntryPrice: 100,
+	})
+
+	engine.mu.Lock()
+	pos := engine.positions["TESTUSDT"]
+	engine.mu.Unlock()
+	if pos == nil || !pos.Managed {
+		t.Fatal("restored target-side position must be managed")
+	}
+}
+
+func TestInitialStopLossKeepsATRDistance(t *testing.T) {
+	sl := CalculateDynamicStopLoss("Sell", 100, 101, 1, 1.5, 0.01)
+	if sl <= 100 {
+		t.Fatalf("invalid short SL %.4f", sl)
+	}
+	distancePct := (sl - 100) / 100 * 100
+	if distancePct < 1.5 {
+		t.Fatalf("initial short SL must be at least 1.5 ATR away, got %.3f%%", distancePct)
+	}
 }

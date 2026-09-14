@@ -807,3 +807,21 @@ Partial warmup не является поводом разрешать стар�
 `execution.max_screening_age = 3m` остаётся последней защитой bot.
 
 Если screener не достигает минимального качества market data, текущий JSON не заменяется.
+
+
+### 35. Управление открытой позицией было связано со screening price
+
+В актуальной версии обнаружено, что public WebSocket ticker уже получал цены символов и хранил их в `WSEngine`, но `UpdateTrailingStops` вызывался из screening loop и получал `candidate.Market.Price`. Поэтому trailing зависел от обновления screening JSON.
+
+Исправление:
+
+- добавлен отдельный `position manager`, работающий независимо от screening;
+- trailing использует свежую WebSocket `MarkPrice`;
+- stale/missing WebSocket price не заменяется старой screening price;
+- при старте REST reconciliation восстанавливает managed-позиции целевого направления и подписывает их ticker;
+- trailing активируется после 1R;
+- изменение SL меньше `trailing_min_move_pct` не отправляется;
+- SL может двигаться только в защитную сторону;
+- добавлены подробные `[TRAILING]`, `[PRICE WARN]` и `[STATE]` логи.
+
+Базовая конфигурация: `trailing_pct=1%`, `trailing_min_move_pct=0.2%`, `trailing_check_interval=5s`, `trailing_price_max_age=5s`.

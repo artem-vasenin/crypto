@@ -282,6 +282,22 @@ PostOnly order with TP/SL
 
 ---
 
+## Position management independence
+
+Открытые позиции должны управляться независимо от свежести screening snapshot.
+
+При старте:
+
+1. бот получает существующие позиции через `/v5/position/list`;
+2. позиции направления текущего бота получают `Managed=true`;
+3. для них восстанавливаются `EntryPrice`, `StopLoss`, `TakeProfit`, размер и leverage;
+4. для каждой managed-позиции включается public ticker subscription;
+5. position manager начинает использовать свежую WebSocket `MarkPrice`.
+
+Если screening JSON устарел или screener временно не работает, это блокирует только новые входы. Уже открытые позиции продолжают управляться.
+
+Если WebSocket MarkPrice отсутствует или устарел, trailing не пересчитывается по старой цене.
+
 # 8. Screening freshness
 
 Bot принимает только screening snapshot не старше `max_screening_age`.
@@ -555,6 +571,14 @@ Market Context
 
 # 7. Trailing lifecycle
 
+Управление открытой позицией отделено от screening:
+
+```text
+screening JSON ──→ открытие новой позиции
+
+public WS MarkPrice ──→ position manager ──→ trailing SL
+```
+
 После fill:
 
 ```text
@@ -570,7 +594,15 @@ ENTRY
           └── trailing becomes active
 ```
 
-Trailing не должен сужать первоначальный структурный стоп сразу после открытия позиции.
+Position manager запускается независимо от screening с `trailing_check_interval` (по умолчанию `5s`). Для trailing принимается только свежая `MarkPrice` из public WebSocket; цена из screening JSON не является fallback.
+
+`trailing_price_max_age` (по умолчанию `5s`) ограничивает допустимый возраст WebSocket цены. Если цена устарела, trailing пропускается, а установленный на бирже SL не изменяется.
+
+`trailing_min_move_pct` (по умолчанию `0.2%`) задаёт минимальное изменение SL для отправки нового `trading-stop`. Это предотвращает движение SL на микрошуме. Новый экстремум при этом запоминается.
+
+SL может двигаться только в безопасную сторону: long — вверх, short — вниз. Ухудшение существующего SL запрещено.
+
+Первоначальный структурный SL строится минимум на `1.5 * ATR(1h)` от entry и дополнительно проходит `ValidateStopLoss`, где минимальная дистанция составляет `max(0.8%, ATR1hPct)`, а максимальная — `max_stop_loss_pct`.
 
 ---
 

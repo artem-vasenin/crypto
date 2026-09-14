@@ -815,3 +815,23 @@ If WebSocket behavior is changed, test at least:
 3. a partial but sufficient warmup allows the cycle to continue;
 4. insufficient fresh data still fails the cycle;
 5. reconnect subscribes only the current universe.
+
+
+## 35. Open-position management must be independent of screening
+
+The trading bot has two separate loops:
+
+* screening snapshot processing for new entries;
+* position management for already-open positions.
+
+Never use `candidate.Market.Price` from screening JSON as the price source for trailing an existing position.
+
+Trailing must use a fresh public WebSocket `MarkPrice`, because the configured Bybit TP/SL trigger is `MarkPrice`. The WebSocket price has a maximum allowed age (`trailing_price_max_age`); if it is stale or missing, trailing must be skipped rather than using a stale screening value.
+
+The position manager runs independently at `trailing_check_interval` (default `5s`). It must continue operating when the screening JSON is stale or unavailable.
+
+At startup, REST position reconciliation must restore positions of the bot's target side as `Managed=true` and subscribe their symbols to the public ticker stream. A restart must not leave an existing managed position unmanaged merely because there is no current screening candidate.
+
+Initial SL remains structural and is validated against ATR and configured risk limits. Trailing activates only after 1R and may move SL only in the protective direction. `trailing_min_move_pct` (default `0.2%`) prevents API updates caused by micro-noise. A new extreme may be remembered without immediately changing the exchange SL.
+
+Logs must make SL movement auditable: price, extreme, entry, previous SL, candidate SL, move percentage, activation/favorable move, price age, reason, API failure, and confirmed local SL update should be visible.

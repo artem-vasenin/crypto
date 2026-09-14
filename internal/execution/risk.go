@@ -40,6 +40,59 @@ func CalculateDynamicStopLoss(side string, entryPrice, pivotLevel, atr1h float64
 	}
 }
 
+// CalculateTrailingStop computes a monotonic trailing SL candidate from a fresh
+// market price. Trailing activates only after the position has moved 1R in its
+// favor and ignores SL improvements smaller than minMovePct to avoid chasing
+// microstructure noise.
+func CalculateTrailingStop(side string, entryPrice, currentSL, price, previousExtreme, trailingPct, minMovePct, tickStep float64) (newSL, extreme float64, active bool, reason string) {
+	if entryPrice <= 0 || currentSL <= 0 || price <= 0 || trailingPct <= 0 {
+		return 0, previousExtreme, false, "invalid_parameters"
+	}
+
+	initialRisk := math.Abs(entryPrice - currentSL)
+	if initialRisk <= 0 {
+		return 0, previousExtreme, false, "invalid_initial_risk"
+	}
+
+	switch {
+	case strings.EqualFold(side, "Buy"):
+		if price < entryPrice+initialRisk {
+			return 0, previousExtreme, false, "activation_not_reached"
+		}
+		extreme = math.Max(previousExtreme, price)
+		newSL = roundPriceDown(extreme*(1-trailingPct/100), tickStep)
+	case strings.EqualFold(side, "Sell"):
+		if price > entryPrice-initialRisk {
+			return 0, previousExtreme, false, "activation_not_reached"
+		}
+		if previousExtreme <= 0 {
+			extreme = price
+		} else {
+			extreme = math.Min(previousExtreme, price)
+		}
+		newSL = roundPriceUp(extreme*(1+trailingPct/100), tickStep)
+	default:
+		return 0, previousExtreme, false, "invalid_side"
+	}
+
+	if newSL <= 0 {
+		return 0, extreme, true, "invalid_candidate_sl"
+	}
+	if (strings.EqualFold(side, "Buy") && newSL <= currentSL) ||
+		(strings.EqualFold(side, "Sell") && newSL >= currentSL) {
+		return newSL, extreme, true, "sl_not_improved"
+	}
+
+	if minMovePct > 0 {
+		movePct := math.Abs(newSL-currentSL) / currentSL * 100
+		if movePct < minMovePct {
+			return newSL, extreme, true, "sl_move_too_small"
+		}
+	}
+
+	return newSL, extreme, true, "new_extreme"
+}
+
 func CalculateDynamicTakeProfit(side string, entryPrice, slPrice, minRR float64, tickStep float64) float64 {
 	if entryPrice <= 0 || slPrice <= 0 {
 		return 0

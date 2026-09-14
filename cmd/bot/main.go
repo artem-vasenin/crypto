@@ -59,24 +59,35 @@ func main() {
 	if err != nil {
 		maxScreeningAge = 3 * time.Minute
 	}
+	trailingCheckInterval, err := time.ParseDuration(cfg.Execution.TrailingCheckInterval)
+	if err != nil {
+		trailingCheckInterval = 5 * time.Second
+	}
+	trailingPriceMaxAge, err := time.ParseDuration(cfg.Execution.TrailingPriceMaxAge)
+	if err != nil {
+		trailingPriceMaxAge = 5 * time.Second
+	}
 
 	botCfg := models.BotConfig{
-		ApiKey:              apiKey,
-		ApiSecret:           apiSecret,
-		Testnet:             cfg.Execution.Testnet,
-		MaxLeverage:         cfg.Execution.MaxLeverage,
-		MarginPerTradeUSD:   cfg.Execution.MarginPerTradeUSD,
-		MaxTotalMarginUSD:   cfg.Execution.MaxTotalMarginUSD,
-		MaxActivePositions:  cfg.Execution.MaxActivePositions,
-		TrailingPct:         cfg.Execution.TrailingPct,
-		CheckInterval:       checkInterval,
-		PendingOrderTimeout: pendingTimeout,
-		MakerFeeRate:        cfg.Execution.MakerFeeRate,
-		TakerFeeRate:        cfg.Execution.TakerFeeRate,
-		ExtraCostPct:        cfg.Execution.ExtraCostPct,
-		MaxStopLossPct:      cfg.Execution.MaxStopLossPct,
-		MinNetProfitPct:     cfg.Execution.MinNetProfitPct,
-		MaxScreeningAge:     maxScreeningAge,
+		ApiKey:                apiKey,
+		ApiSecret:             apiSecret,
+		Testnet:               cfg.Execution.Testnet,
+		MaxLeverage:           cfg.Execution.MaxLeverage,
+		MarginPerTradeUSD:     cfg.Execution.MarginPerTradeUSD,
+		MaxTotalMarginUSD:     cfg.Execution.MaxTotalMarginUSD,
+		MaxActivePositions:    cfg.Execution.MaxActivePositions,
+		TrailingPct:           cfg.Execution.TrailingPct,
+		TrailingMinMovePct:    cfg.Execution.TrailingMinMovePct,
+		TrailingCheckInterval: trailingCheckInterval,
+		TrailingPriceMaxAge:   trailingPriceMaxAge,
+		CheckInterval:         checkInterval,
+		PendingOrderTimeout:   pendingTimeout,
+		MakerFeeRate:          cfg.Execution.MakerFeeRate,
+		TakerFeeRate:          cfg.Execution.TakerFeeRate,
+		ExtraCostPct:          cfg.Execution.ExtraCostPct,
+		MaxStopLossPct:        cfg.Execution.MaxStopLossPct,
+		MinNetProfitPct:       cfg.Execution.MinNetProfitPct,
+		MaxScreeningAge:       maxScreeningAge,
 	}
 
 	engine := execution.NewEngine(botCfg, *strategyName)
@@ -91,6 +102,7 @@ func main() {
 		log.Fatalf("[FATAL] Initial account state refresh failed: %v", err)
 	}
 	engine.LogActivePositions(ctx)
+	go engine.RunPositionManager(ctx, botCfg.TrailingCheckInterval)
 
 	log.Printf("[INFO] Bot active | strategy=%s target_side=%s margin=$%.2f max_margin=$%.2f max_positions=%d leverage<=x%d testnet=%v",
 		*strategyName,
@@ -164,8 +176,6 @@ func processIteration(ctx context.Context, engine *execution.Engine, filePath, t
 				return
 			}
 			defer func() { <-sem }()
-
-			engine.UpdateTrailingStops(ctx, candidate.Symbol, candidate.Market.Price)
 
 			if err := engine.ProcessCandidate(ctx, candidate, targetStrategy); err != nil && ctx.Err() == nil {
 				log.Printf("[WARN] candidate %s: %v", candidate.Symbol, err)

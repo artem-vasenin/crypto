@@ -44,6 +44,12 @@ type OrderUpdate struct {
 	CumExecQty float64
 }
 
+type PriceState struct {
+	LastPrice float64
+	MarkPrice float64
+	UpdatedAt time.Time
+}
+
 type WSEngine struct {
 	apiKey    string
 	apiSecret string
@@ -58,7 +64,7 @@ type WSEngine struct {
 	privateConn *websocket.Conn
 
 	mu         sync.RWMutex
-	prices     map[string]float64
+	prices     map[string]PriceState
 	subscribed map[string]bool
 	pubConnMu  sync.Mutex
 	privConnMu sync.Mutex
@@ -83,7 +89,7 @@ func NewWSEngine(
 		onOrder:         onOrder,
 		onExecution:     onExecution,
 		onBalanceUpdate: onBalanceUpdate,
-		prices:          make(map[string]float64),
+		prices:          make(map[string]PriceState),
 		subscribed:      make(map[string]bool),
 	}
 }
@@ -91,14 +97,31 @@ func NewWSEngine(
 func (w *WSEngine) GetLatestPrice(symbol string) (float64, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	price, ok := w.prices[symbol]
-	return price, ok && price > 0
+	state, ok := w.prices[symbol]
+	return state.LastPrice, ok && state.LastPrice > 0
+}
+
+func (w *WSEngine) GetFreshMarkPrice(symbol string, maxAge time.Duration) (float64, time.Duration, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	state, ok := w.prices[symbol]
+	if !ok || state.MarkPrice <= 0 || state.UpdatedAt.IsZero() {
+		return 0, 0, false
+	}
+
+	age := time.Since(state.UpdatedAt)
+	if age < 0 || (maxAge > 0 && age > maxAge) {
+		return state.MarkPrice, age, false
+	}
+	return state.MarkPrice, age, true
 }
 
 func (w *WSEngine) GetBTCTrend15m() (float64, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	price, ok := w.prices["BTCUSDT"]
+	state, ok := w.prices["BTCUSDT"]
+	price := state.LastPrice
 	if !ok || price <= 0 || w.btcBase15mPrice <= 0 {
 		return 0, false
 	}
@@ -177,21 +200,39 @@ func (w *WSEngine) parsePublicMessage(message []byte) {
 	var data struct {
 		Symbol    string `json:"symbol"`
 		LastPrice string `json:"lastPrice"`
+		MarkPrice string `json:"markPrice"`
 	}
 	if json.Unmarshal(msg.Data, &data) != nil || data.Symbol == "" {
 		return
 	}
-	price, err := strconv.ParseFloat(data.LastPrice, 64)
-	if err != nil || price <= 0 {
+
+	w.mu.Lock()
+	state := w.prices[data.Symbol]
+	if data.LastPrice != "" {
+		if price, err := strconv.ParseFloat(data.LastPrice, 64); err == nil && price > 0 {
+			state.LastPrice = price
+		}
+	}
+	if data.MarkPrice != "" {
+		if markPrice, err := strconv.ParseFloat(data.MarkPrice, 64); err == nil && markPrice > 0 {
+			state.MarkPrice = markPrice
+		}
+	}
+
+	if state.LastPrice <= 0 {
+		w.mu.Unlock()
 		return
 	}
 
-	w.mu.Lock()
-	w.prices[data.Symbol] = price
+	// Bybit linear ticker uses snapshot + delta messages. A missing field in a
+	// delta means that the previous value has not changed. Keep the previous
+	// MarkPrice/LastPrice while refreshing the timestamp of the ticker update.
+	state.UpdatedAt = time.Now().UTC()
+	w.prices[data.Symbol] = state
 	if data.Symbol == "BTCUSDT" {
 		bucket := time.Now().UTC().Truncate(15 * time.Minute)
 		if w.btcBase15mPrice == 0 || !bucket.Equal(w.btc15mBucket) {
-			w.btcBase15mPrice = price
+			w.btcBase15mPrice = state.LastPrice
 			w.btc15mBucket = bucket
 		}
 	}

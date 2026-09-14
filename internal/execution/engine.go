@@ -22,20 +22,22 @@ import (
 )
 
 type Engine struct {
-	cfg              models.BotConfig
-	client           *http.Client
-	baseURL          string
-	mu               sync.Mutex
-	positions        map[string]*models.PositionState
-	closedHistory    map[string]*models.PositionState
-	cooldowns        map[string]time.Time
-	disabledTokens   map[string]bool
-	candidatesCache  map[string]models.Candidate
-	cachedBalance    float64
-	lastBalanceCheck time.Time
-	wsEngine         *WSEngine
-	targetSide       string
-	processedExecs   map[string]time.Time
+	cfg               models.BotConfig
+	client            *http.Client
+	baseURL           string
+	mu                sync.Mutex
+	positions         map[string]*models.PositionState
+	closedHistory     map[string]*models.PositionState
+	cooldowns         map[string]time.Time
+	disabledTokens    map[string]bool
+	candidatesCache   map[string]models.Candidate
+	cachedBalance     float64
+	lastBalanceCheck  time.Time
+	wsEngine          *WSEngine
+	targetSide        string
+	processedExecs    map[string]time.Time
+	lastPriceWarnings map[string]time.Time
+	lastRiskWarnings  map[string]time.Time
 }
 
 func NewEngine(cfg models.BotConfig, strategy string) *Engine {
@@ -50,16 +52,18 @@ func NewEngine(cfg models.BotConfig, strategy string) *Engine {
 	}
 
 	engine := &Engine{
-		cfg:             cfg,
-		client:          &http.Client{Timeout: 5 * time.Second},
-		baseURL:         baseURL,
-		positions:       make(map[string]*models.PositionState),
-		closedHistory:   make(map[string]*models.PositionState),
-		cooldowns:       make(map[string]time.Time),
-		disabledTokens:  make(map[string]bool),
-		candidatesCache: make(map[string]models.Candidate),
-		targetSide:      targetSide,
-		processedExecs:  make(map[string]time.Time),
+		cfg:               cfg,
+		client:            &http.Client{Timeout: 5 * time.Second},
+		baseURL:           baseURL,
+		positions:         make(map[string]*models.PositionState),
+		closedHistory:     make(map[string]*models.PositionState),
+		cooldowns:         make(map[string]time.Time),
+		disabledTokens:    make(map[string]bool),
+		candidatesCache:   make(map[string]models.Candidate),
+		targetSide:        targetSide,
+		processedExecs:    make(map[string]time.Time),
+		lastPriceWarnings: make(map[string]time.Time),
+		lastRiskWarnings:  make(map[string]time.Time),
 	}
 
 	engine.wsEngine = NewWSEngine(
@@ -103,15 +107,17 @@ func (e *Engine) handleBalanceUpdateWS(balance float64) {
 
 func (e *Engine) handlePositionUpdateWS(update PositionUpdate) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	if update.Size <= 0 {
 		if pos, ok := e.positions[update.Symbol]; ok && !pos.Pending {
 			e.closedHistory[update.Symbol] = pos
 			delete(e.positions, update.Symbol)
 			delete(e.candidatesCache, update.Symbol)
+			delete(e.lastPriceWarnings, update.Symbol)
+			delete(e.lastRiskWarnings, update.Symbol)
 			e.cooldowns[update.Symbol] = time.Now().Add(15 * time.Minute)
 		}
+		e.mu.Unlock()
 		return
 	}
 
@@ -128,8 +134,16 @@ func (e *Engine) handlePositionUpdateWS(update PositionUpdate) {
 	pos.Size = update.Size
 	pos.EntryPrice = update.EntryPrice
 	pos.Pending = false
+	pos.Managed = update.Side == e.targetSide
 	if pos.OpenedAt.IsZero() {
 		pos.OpenedAt = time.Now().UTC()
+	}
+	e.mu.Unlock()
+
+	if pos.Managed {
+		if err := e.wsEngine.SubscribeTicker(update.Symbol); err != nil {
+			log.Printf("[WS WARN] failed to subscribe position ticker %s: %v", update.Symbol, err)
+		}
 	}
 }
 
@@ -464,6 +478,7 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 		pos.OrderID = orderID
 		pos.StopLoss = sl
 		pos.TakeProfit = tp
+		pos.TickSize = tickSize
 		pos.RiskAttached = true
 		if pos.Size <= 0 {
 			pos.Pending = true
@@ -472,8 +487,9 @@ func (e *Engine) ProcessCandidate(ctx context.Context, candidate models.Candidat
 	e.mu.Unlock()
 
 	cleanupPending = false
-	log.Printf("[ORDER PLACED] %s %s qty=%.8f price=%.8f leverage=x%d order=%s",
-		candidate.Symbol, side, qty, entryPrice, targetLeverage, orderID)
+	slDistancePct := math.Abs(sl-entryPrice) / entryPrice * 100
+	log.Printf("[ORDER PLACED] %s %s qty=%.8f price=%.8f leverage=x%d order=%s initial_sl=%.8f initial_tp=%.8f sl_distance=%.3f%% atr1h=%.3f%%",
+		candidate.Symbol, side, qty, entryPrice, targetLeverage, orderID, sl, tp, slDistancePct, candidate.Indicators.ATR1hPct)
 
 	return nil
 }
@@ -533,90 +549,214 @@ func (e *Engine) CleanupPendingOrders(ctx context.Context) {
 	}
 }
 
-func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string, price float64) {
-	if e.cfg.TrailingPct <= 0 || price <= 0 {
+func (e *Engine) RunPositionManager(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	log.Printf("[POSITION MANAGER] started | interval=%s price_max_age=%s trailing=%.2f%% min_sl_move=%.2f%%",
+		interval, e.cfg.TrailingPriceMaxAge, e.cfg.TrailingPct, e.cfg.TrailingMinMovePct)
+
+	for {
+		e.manageOpenPositions(ctx)
+		select {
+		case <-ctx.Done():
+			log.Printf("[POSITION MANAGER] stopped")
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (e *Engine) manageOpenPositions(ctx context.Context) {
+	e.mu.Lock()
+	symbols := make([]string, 0, len(e.positions))
+	now := time.Now()
+	for symbol, pos := range e.positions {
+		if !pos.Managed || pos.Pending || pos.Size <= 0 {
+			continue
+		}
+		if !pos.RiskAttached {
+			last := e.lastRiskWarnings[symbol]
+			if last.IsZero() || now.Sub(last) >= 30*time.Second {
+				e.lastRiskWarnings[symbol] = now
+				log.Printf("[CRITICAL] %s managed position has no attached SL/TP; trailing disabled", symbol)
+			}
+			continue
+		}
+		symbols = append(symbols, symbol)
+	}
+	e.mu.Unlock()
+
+	for _, symbol := range symbols {
+		e.UpdateTrailingStops(ctx, symbol)
+	}
+}
+
+func (e *Engine) UpdateTrailingStops(ctx context.Context, symbol string) {
+	if e.cfg.TrailingPct <= 0 {
+		return
+	}
+
+	price, age, fresh := e.wsEngine.GetFreshMarkPrice(symbol, e.cfg.TrailingPriceMaxAge)
+	if !fresh {
+		e.logStalePriceWarning(symbol, price, age)
 		return
 	}
 
 	e.mu.Lock()
 	pos, ok := e.positions[symbol]
-	if !ok || !pos.Managed || pos.Pending || !pos.RiskAttached || pos.StopLoss <= 0 || pos.TakeProfit <= 0 {
+	if !ok || !pos.Managed || pos.Pending || !pos.RiskAttached || pos.StopLoss <= 0 || pos.TakeProfit <= 0 || pos.EntryPrice <= 0 {
 		e.mu.Unlock()
 		return
 	}
 
-	// Do not activate trailing immediately after entry. The first ticker can be
-	// equal to (or only a few ticks above) the entry and an immediate 1%
-	// trailing stop would silently replace a structurally calculated stop with
-	// a much tighter one. Activate trailing only after the position reaches 1R.
-	initialRisk := math.Abs(pos.EntryPrice - pos.StopLoss)
-	if initialRisk <= 0 {
-		e.mu.Unlock()
-		return
-	}
-
-	var newSL float64
-	if pos.Side == "Buy" {
-		if price < pos.EntryPrice+initialRisk {
-			e.mu.Unlock()
-			return
-		}
-		if price > pos.HighestPrice {
-			pos.HighestPrice = price
-		}
-		newSL = pos.HighestPrice * (1 - e.cfg.TrailingPct/100)
-		if newSL <= pos.StopLoss {
-			e.mu.Unlock()
-			return
-		}
-	} else {
-		if price > pos.EntryPrice-initialRisk {
-			e.mu.Unlock()
-			return
-		}
-		if pos.LowestPrice == 0 || price < pos.LowestPrice {
-			pos.LowestPrice = price
-		}
-		newSL = pos.LowestPrice * (1 + e.cfg.TrailingPct/100)
-		if newSL >= pos.StopLoss {
-			e.mu.Unlock()
-			return
-		}
-	}
+	oldSL := pos.StopLoss
 	oldTP := pos.TakeProfit
 	side := pos.Side
+	entry := pos.EntryPrice
+	previousExtreme := pos.HighestPrice
+	if side == "Sell" {
+		previousExtreme = pos.LowestPrice
+	}
 	e.mu.Unlock()
 
-	_, _, tickSize, _, _, err := e.getInstrumentLimits(ctx, symbol)
-	if err != nil {
+	e.mu.Lock()
+	pos, ok = e.positions[symbol]
+	tickSize := 0.0
+	if ok {
+		tickSize = pos.TickSize
+	}
+	e.mu.Unlock()
+	if !ok {
 		return
 	}
-	newSL = RoundToStep(newSL, tickSize)
-	if err := e.SetTradingStopMarkPrice(ctx, symbol, side, newSL, oldTP, tickSize); err != nil {
-		log.Printf("[WARN] trailing stop update %s: %v", symbol, err)
+	if tickSize <= 0 {
+		var err error
+		_, _, tickSize, _, _, err = e.getInstrumentLimits(ctx, symbol)
+		if err != nil {
+			log.Printf("[TRAILING] %s action=SKIP reason=instrument_limits_error err=%v", symbol, err)
+			return
+		}
+		e.mu.Lock()
+		if current, exists := e.positions[symbol]; exists && current.Side == side {
+			current.TickSize = tickSize
+		}
+		e.mu.Unlock()
+	}
+
+	newSL, extreme, active, reason := CalculateTrailingStop(
+		side,
+		entry,
+		oldSL,
+		price,
+		previousExtreme,
+		e.cfg.TrailingPct,
+		e.cfg.TrailingMinMovePct,
+		tickSize,
+	)
+
+	if !active {
 		return
 	}
 
 	e.mu.Lock()
-	if current, ok := e.positions[symbol]; ok {
-		if (current.Side == "Buy" && newSL > current.StopLoss) ||
-			(current.Side == "Sell" && newSL < current.StopLoss) {
+	if current, ok := e.positions[symbol]; ok && current.Side == side {
+		if side == "Buy" && extreme > current.HighestPrice {
+			current.HighestPrice = extreme
+		}
+		if side == "Sell" && (current.LowestPrice == 0 || extreme < current.LowestPrice) {
+			current.LowestPrice = extreme
+		}
+	}
+	e.mu.Unlock()
+
+	if reason != "new_extreme" {
+		if reason == "sl_move_too_small" {
+			movePct := math.Abs(newSL-oldSL) / oldSL * 100
+			log.Printf("[TRAILING] %s %s action=SKIP reason=%s price=%.8f extreme=%.8f entry=%.8f current_sl=%.8f candidate_sl=%.8f move=%.4f%% min_move=%.4f%% price_age=%s",
+				symbol, side, reason, price, extreme, entry, oldSL, newSL, movePct, e.cfg.TrailingMinMovePct, age.Round(time.Millisecond))
+		}
+		return
+	}
+
+	movePct := math.Abs(newSL-oldSL) / oldSL * 100
+	favorableMovePct := math.Abs(extreme-entry) / entry * 100
+	activation := "already_active"
+	if previousExtreme <= 0 {
+		activation = "1R_reached"
+	}
+	log.Printf("[TRAILING] %s %s action=UPDATE reason=new_extreme activation=%s price=%.8f extreme=%.8f entry=%.8f current_sl=%.8f candidate_sl=%.8f move=%.4f%% favorable=%.3f%% price_age=%s",
+		symbol, side, activation, price, extreme, entry, oldSL, newSL, movePct, favorableMovePct, age.Round(time.Millisecond))
+
+	if err := e.SetTradingStopMarkPrice(ctx, symbol, side, newSL, oldTP, tickSize); err != nil {
+		log.Printf("[TRAILING] %s %s action=FAILED attempted_sl=%.8f current_sl=%.8f err=%v", symbol, side, newSL, oldSL, err)
+		return
+	}
+
+	e.mu.Lock()
+	if current, ok := e.positions[symbol]; ok && current.Side == side {
+		if (side == "Buy" && newSL > current.StopLoss) || (side == "Sell" && newSL < current.StopLoss) {
+			previous := current.StopLoss
 			current.StopLoss = newSL
+			delete(e.lastPriceWarnings, symbol)
+			delete(e.lastRiskWarnings, symbol)
+			log.Printf("[TRAILING] %s %s action=CONFIRMED sl=%.8f->%.8f delta=%.8f", symbol, side, previous, newSL, newSL-previous)
 		}
 	}
 	e.mu.Unlock()
 }
 
+func (e *Engine) logStalePriceWarning(symbol string, price float64, age time.Duration) {
+	now := time.Now()
+	e.mu.Lock()
+	last := e.lastPriceWarnings[symbol]
+	if !last.IsZero() && now.Sub(last) < 30*time.Second {
+		e.mu.Unlock()
+		return
+	}
+	e.lastPriceWarnings[symbol] = now
+	e.mu.Unlock()
+
+	if price > 0 {
+		log.Printf("[PRICE WARN] %s action=TRAILING_SKIPPED reason=stale_websocket_mark_price price=%.8f age=%s max_age=%s", symbol, price, age.Round(time.Millisecond), e.cfg.TrailingPriceMaxAge)
+	} else {
+		log.Printf("[PRICE WARN] %s action=TRAILING_SKIPPED reason=no_websocket_mark_price max_age=%s", symbol, e.cfg.TrailingPriceMaxAge)
+	}
+}
+
 func (e *Engine) LogActivePositions(ctx context.Context) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.positions) == 0 {
+	positions := make([]models.PositionState, 0, len(e.positions))
+	for _, pos := range e.positions {
+		positions = append(positions, *pos)
+	}
+	e.mu.Unlock()
+
+	if len(positions) == 0 {
 		log.Printf("[STATE] active positions: 0")
 		return
 	}
-	for symbol, pos := range e.positions {
-		log.Printf("[STATE] %s side=%s managed=%v size=%.8f entry=%.8f pending=%v sl=%.8f tp=%.8f",
-			symbol, pos.Side, pos.Managed, pos.Size, pos.EntryPrice, pos.Pending, pos.StopLoss, pos.TakeProfit)
+
+	for _, pos := range positions {
+		price, age, fresh := e.wsEngine.GetFreshMarkPrice(pos.Symbol, e.cfg.TrailingPriceMaxAge)
+		priceStatus := "stale"
+		if fresh {
+			priceStatus = "fresh"
+		}
+		pnlPct := 0.0
+		if pos.EntryPrice > 0 && price > 0 {
+			if pos.Side == "Buy" {
+				pnlPct = (price - pos.EntryPrice) / pos.EntryPrice * 100
+			} else if pos.Side == "Sell" {
+				pnlPct = (pos.EntryPrice - price) / pos.EntryPrice * 100
+			}
+		}
+		log.Printf("[STATE] %s side=%s managed=%v size=%.8f entry=%.8f mark=%.8f pnl=%.3f%% price_age=%s price_status=%s pending=%v risk=%v sl=%.8f tp=%.8f",
+			pos.Symbol, pos.Side, pos.Managed, pos.Size, pos.EntryPrice, price, pnlPct, age.Round(time.Millisecond), priceStatus, pos.Pending, pos.RiskAttached, pos.StopLoss, pos.TakeProfit)
 	}
 }
 
@@ -756,8 +896,8 @@ func (e *Engine) refreshPositions(ctx context.Context) error {
 		return fmt.Errorf("position api %d: %s", res.RetCode, res.RetMsg)
 	}
 
+	managedSymbols := make([]string, 0)
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	for _, item := range res.Result.List {
 		size, _ := strconv.ParseFloat(item.Size, 64)
 		if size <= 0 || item.Side == "" {
@@ -774,6 +914,7 @@ func (e *Engine) refreshPositions(ctx context.Context) error {
 		if margin <= 0 {
 			margin = e.cfg.MarginPerTradeUSD
 		}
+		managed := item.Side == e.targetSide
 		e.positions[item.Symbol] = &models.PositionState{
 			Symbol:       item.Symbol,
 			Side:         item.Side,
@@ -784,10 +925,21 @@ func (e *Engine) refreshPositions(ctx context.Context) error {
 			MarginUSD:    margin,
 			Leverage:     int(leverage),
 			OpenedAt:     time.Now().UTC(),
-			Managed:      false,
+			Managed:      managed,
 			RiskAttached: sl > 0 && tp > 0,
 		}
+		if managed {
+			managedSymbols = append(managedSymbols, item.Symbol)
+		}
 	}
+	e.mu.Unlock()
+
+	for _, symbol := range managedSymbols {
+		if err := e.wsEngine.SubscribeTicker(symbol); err != nil {
+			log.Printf("[WS WARN] failed to subscribe restored position ticker %s: %v", symbol, err)
+		}
+	}
+
 	return nil
 }
 

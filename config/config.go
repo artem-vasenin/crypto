@@ -36,20 +36,23 @@ type Config struct {
 	} `json:"analysis"`
 
 	Execution struct {
-		Testnet             bool    `json:"testnet"`
-		MaxLeverage         int     `json:"max_leverage"`
-		MarginPerTradeUSD   float64 `json:"margin_per_trade_usd"`
-		MaxTotalMarginUSD   float64 `json:"max_total_margin_usd"`
-		MaxActivePositions  int     `json:"max_active_positions"`
-		TrailingPct         float64 `json:"trailing_pct"`
-		CheckInterval       string  `json:"check_interval"`
-		PendingOrderTimeout string  `json:"pending_order_timeout"`
-		MakerFeeRate        float64 `json:"maker_fee_rate"`
-		TakerFeeRate        float64 `json:"taker_fee_rate"`
-		ExtraCostPct        float64 `json:"extra_cost_pct"`
-		MaxStopLossPct      float64 `json:"max_stop_loss_pct"`
-		MinNetProfitPct     float64 `json:"min_net_profit_pct"`
-		MaxScreeningAge     string  `json:"max_screening_age"`
+		Testnet               bool    `json:"testnet"`
+		MaxLeverage           int     `json:"max_leverage"`
+		MarginPerTradeUSD     float64 `json:"margin_per_trade_usd"`
+		MaxTotalMarginUSD     float64 `json:"max_total_margin_usd"`
+		MaxActivePositions    int     `json:"max_active_positions"`
+		TrailingPct           float64 `json:"trailing_pct"`
+		TrailingMinMovePct    float64 `json:"trailing_min_move_pct"`
+		TrailingCheckInterval string  `json:"trailing_check_interval"`
+		TrailingPriceMaxAge   string  `json:"trailing_price_max_age"`
+		CheckInterval         string  `json:"check_interval"`
+		PendingOrderTimeout   string  `json:"pending_order_timeout"`
+		MakerFeeRate          float64 `json:"maker_fee_rate"`
+		TakerFeeRate          float64 `json:"taker_fee_rate"`
+		ExtraCostPct          float64 `json:"extra_cost_pct"`
+		MaxStopLossPct        float64 `json:"max_stop_loss_pct"`
+		MinNetProfitPct       float64 `json:"min_net_profit_pct"`
+		MaxScreeningAge       string  `json:"max_screening_age"`
 	} `json:"execution"`
 
 	Concurrency int           `json:"concurrency"`
@@ -92,20 +95,23 @@ type rawConfig struct {
 	} `json:"analysis"`
 
 	Execution struct {
-		Testnet             bool    `json:"testnet"`
-		MaxLeverage         int     `json:"max_leverage"`
-		MarginPerTradeUSD   float64 `json:"margin_per_trade_usd"`
-		MaxTotalMarginUSD   float64 `json:"max_total_margin_usd"`
-		MaxActivePositions  int     `json:"max_active_positions"`
-		TrailingPct         float64 `json:"trailing_pct"`
-		CheckInterval       string  `json:"check_interval"`
-		PendingOrderTimeout string  `json:"pending_order_timeout"`
-		MakerFeeRate        float64 `json:"maker_fee_rate"`
-		TakerFeeRate        float64 `json:"taker_fee_rate"`
-		ExtraCostPct        float64 `json:"extra_cost_pct"`
-		MaxStopLossPct      float64 `json:"max_stop_loss_pct"`
-		MinNetProfitPct     float64 `json:"min_net_profit_pct"`
-		MaxScreeningAge     string  `json:"max_screening_age"`
+		Testnet               bool    `json:"testnet"`
+		MaxLeverage           int     `json:"max_leverage"`
+		MarginPerTradeUSD     float64 `json:"margin_per_trade_usd"`
+		MaxTotalMarginUSD     float64 `json:"max_total_margin_usd"`
+		MaxActivePositions    int     `json:"max_active_positions"`
+		TrailingPct           float64 `json:"trailing_pct"`
+		TrailingMinMovePct    float64 `json:"trailing_min_move_pct"`
+		TrailingCheckInterval string  `json:"trailing_check_interval"`
+		TrailingPriceMaxAge   string  `json:"trailing_price_max_age"`
+		CheckInterval         string  `json:"check_interval"`
+		PendingOrderTimeout   string  `json:"pending_order_timeout"`
+		MakerFeeRate          float64 `json:"maker_fee_rate"`
+		TakerFeeRate          float64 `json:"taker_fee_rate"`
+		ExtraCostPct          float64 `json:"extra_cost_pct"`
+		MaxStopLossPct        float64 `json:"max_stop_loss_pct"`
+		MinNetProfitPct       float64 `json:"min_net_profit_pct"`
+		MaxScreeningAge       string  `json:"max_screening_age"`
 	} `json:"execution"`
 
 	Concurrency int    `json:"concurrency"`
@@ -199,6 +205,16 @@ func Load(path string) (Config, error) {
 		cfg.Analysis.OrderBookWarmupTimeoutSec = 5
 	}
 	cfg.Analysis.OrderBookWarmupTimeout = time.Duration(cfg.Analysis.OrderBookWarmupTimeoutSec) * time.Second
+	if cfg.Execution.TrailingMinMovePct <= 0 {
+		cfg.Execution.TrailingMinMovePct = 0.2
+	}
+	if cfg.Execution.TrailingCheckInterval == "" {
+		cfg.Execution.TrailingCheckInterval = "5s"
+	}
+	if cfg.Execution.TrailingPriceMaxAge == "" {
+		cfg.Execution.TrailingPriceMaxAge = "5s"
+	}
+
 	if cfg.Execution.MaxTotalMarginUSD <= 0 {
 		cfg.Execution.MaxTotalMarginUSD = 20
 	}
