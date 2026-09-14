@@ -21,15 +21,18 @@ type Config struct {
 	} `json:"filters"`
 
 	Analysis struct {
-		KlineLimit5m      int `json:"kline_limit_5m"`
-		KlineLimit15m     int `json:"kline_limit_15m"`
-		KlineLimit30m     int `json:"kline_limit_30m"`
-		KlineLimit1h      int `json:"kline_limit_1h"`
-		KlineLimit4h      int `json:"kline_limit_4h"`
-		OpenInterestLimit int `json:"open_interest_limit"`
-		FundingLimit      int `json:"funding_limit"`
-		OrderBookLimit    int `json:"order_book_limit"`
-		MaxDataAgeSeconds int `json:"max_data_age_seconds"`
+		KlineLimit5m              int           `json:"kline_limit_5m"`
+		KlineLimit15m             int           `json:"kline_limit_15m"`
+		KlineLimit30m             int           `json:"kline_limit_30m"`
+		KlineLimit1h              int           `json:"kline_limit_1h"`
+		KlineLimit4h              int           `json:"kline_limit_4h"`
+		OpenInterestLimit         int           `json:"open_interest_limit"`
+		FundingLimit              int           `json:"funding_limit"`
+		OrderBookLimit            int           `json:"order_book_limit"`
+		MaxDataAgeSeconds         int           `json:"max_data_age_seconds"`
+		MinOrderBookReadyPct      float64       `json:"min_order_book_ready_pct"`
+		OrderBookWarmupTimeoutSec int           `json:"order_book_warmup_timeout_sec"`
+		OrderBookWarmupTimeout    time.Duration `json:"-"`
 	} `json:"analysis"`
 
 	Execution struct {
@@ -74,15 +77,18 @@ type rawConfig struct {
 	} `json:"filters"`
 
 	Analysis struct {
-		KlineLimit5m      int `json:"kline_limit_5m"`
-		KlineLimit15m     int `json:"kline_limit_15m"`
-		KlineLimit30m     int `json:"kline_limit_30m"`
-		KlineLimit1h      int `json:"kline_limit_1h"`
-		KlineLimit4h      int `json:"kline_limit_4h"`
-		OpenInterestLimit int `json:"open_interest_limit"`
-		FundingLimit      int `json:"funding_limit"`
-		OrderBookLimit    int `json:"order_book_limit"`
-		MaxDataAgeSeconds int `json:"max_data_age_seconds"`
+		KlineLimit5m              int           `json:"kline_limit_5m"`
+		KlineLimit15m             int           `json:"kline_limit_15m"`
+		KlineLimit30m             int           `json:"kline_limit_30m"`
+		KlineLimit1h              int           `json:"kline_limit_1h"`
+		KlineLimit4h              int           `json:"kline_limit_4h"`
+		OpenInterestLimit         int           `json:"open_interest_limit"`
+		FundingLimit              int           `json:"funding_limit"`
+		OrderBookLimit            int           `json:"order_book_limit"`
+		MaxDataAgeSeconds         int           `json:"max_data_age_seconds"`
+		MinOrderBookReadyPct      float64       `json:"min_order_book_ready_pct"`
+		OrderBookWarmupTimeoutSec int           `json:"order_book_warmup_timeout_sec"`
+		OrderBookWarmupTimeout    time.Duration `json:"-"`
 	} `json:"analysis"`
 
 	Execution struct {
@@ -186,6 +192,13 @@ func Load(path string) (Config, error) {
 	if cfg.Analysis.MaxDataAgeSeconds <= 0 {
 		cfg.Analysis.MaxDataAgeSeconds = 30
 	}
+	if cfg.Analysis.MinOrderBookReadyPct <= 0 || cfg.Analysis.MinOrderBookReadyPct > 100 {
+		cfg.Analysis.MinOrderBookReadyPct = 80
+	}
+	if cfg.Analysis.OrderBookWarmupTimeoutSec <= 0 {
+		cfg.Analysis.OrderBookWarmupTimeoutSec = 5
+	}
+	cfg.Analysis.OrderBookWarmupTimeout = time.Duration(cfg.Analysis.OrderBookWarmupTimeoutSec) * time.Second
 	if cfg.Execution.MaxTotalMarginUSD <= 0 {
 		cfg.Execution.MaxTotalMarginUSD = 20
 	}

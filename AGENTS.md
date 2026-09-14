@@ -779,3 +779,39 @@ When explaining changes:
 * if something is uncertain, say so explicitly.
 
 The goal is to build a system the user understands and can maintain themselves.
+⸻
+
+34. Public WebSocket screening reliability
+
+The screener uses `internal/bybit/PublicWSStream` for live order books and kline updates.
+
+The current subscription model is a replacement model, not an accumulating model. Each screening cycle provides the current preselected symbol universe. Topics removed from the universe are unsubscribed, and newly required topics are subscribed. Reconnects resubscribe only the current topic set.
+
+Do not reintroduce a design where `subTopics` grows forever across screening cycles.
+
+Order-book warmup is intentionally partial:
+
+* `max_data_age_seconds` defines freshness;
+* `min_order_book_ready_pct` defines the minimum percentage of selected symbols that must be fresh;
+* `order_book_warmup_timeout_sec` bounds the wait for snapshots;
+* symbols without fresh order books are excluded from the current analysis rather than invalidating the whole cycle.
+
+Default baseline:
+
+```text
+max_data_age_seconds = 30
+min_order_book_ready_pct = 80
+order_book_warmup_timeout_sec = 5
+```
+
+Do not weaken `execution.max_screening_age` as a workaround for screener failures. The bot must continue rejecting stale screening JSON.
+
+Public WebSocket command responses are parsed so `subscribe`/`unsubscribe` failures and `failTopics` are visible in logs. Keep this diagnostic behavior when modifying the WebSocket layer.
+
+If WebSocket behavior is changed, test at least:
+
+1. replacing the current topic set does not retain old symbols;
+2. fresh order-book filtering excludes stale symbols;
+3. a partial but sufficient warmup allows the cycle to continue;
+4. insufficient fresh data still fails the cycle;
+5. reconnect subscribes only the current universe.

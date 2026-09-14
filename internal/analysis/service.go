@@ -102,16 +102,33 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 		}, nil
 	}
 
-	if err := s.ensureMarketData(ctx, symbols); err != nil {
+	readySymbols, err := s.ensureMarketData(ctx, symbols)
+	if err != nil {
 		return models.ScreeningResult{}, err
 	}
 
-	results := make([]models.Candidate, 0, len(filtered))
+	ready := make(map[string]bool, len(readySymbols))
+	for _, symbol := range readySymbols {
+		ready[symbol] = true
+	}
+
+	readyFiltered := make([]pair, 0, len(filtered))
+	for _, p := range filtered {
+		if ready[p.instrument.Symbol] {
+			readyFiltered = append(readyFiltered, p)
+		}
+	}
+
+	if len(readyFiltered) == 0 {
+		return models.ScreeningResult{}, fmt.Errorf("no selected symbols have a fresh order-book snapshot")
+	}
+
+	results := make([]models.Candidate, 0, len(readyFiltered))
 	var resultMu sync.Mutex
 	sem := make(chan struct{}, maxInt(1, s.cfg.Concurrency))
 	var wg sync.WaitGroup
 
-	for _, p := range filtered {
+	for _, p := range readyFiltered {
 		p := p
 		wg.Add(1)
 		go func() {
@@ -166,12 +183,12 @@ func (s *Service) Run(ctx context.Context) (models.ScreeningResult, error) {
 	}, nil
 }
 
-func (s *Service) ensureMarketData(ctx context.Context, symbols []string) error {
+func (s *Service) ensureMarketData(ctx context.Context, symbols []string) ([]string, error) {
 	s.mu.Lock()
-	s.wsStream.AddSymbols(symbols)
+	s.wsStream.ReplaceSymbols(symbols)
 	if err := s.wsStream.Start(ctx, symbols); err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("public WS start failed: %w", err)
+		return nil, fmt.Errorf("public WS start failed: %w", err)
 	}
 
 	toWarm := make([]string, 0, len(symbols))
@@ -193,24 +210,45 @@ func (s *Service) ensureMarketData(ctx context.Context, symbols []string) error 
 		s.mu.Unlock()
 	}
 
-	// New subscriptions need a short opportunity to receive an order-book snapshot.
-	deadline := time.NewTimer(3 * time.Second)
+	maxAge := time.Duration(s.cfg.Analysis.MaxDataAgeSeconds) * time.Second
+	minReadyPct := s.cfg.Analysis.MinOrderBookReadyPct
+	if minReadyPct <= 0 || minReadyPct > 100 {
+		minReadyPct = 80
+	}
+
+	deadline := time.NewTimer(s.cfg.Analysis.OrderBookWarmupTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		if s.allOrderBooksReady(symbols) {
-			return nil
+		ready := freshOrderBookSymbols(symbols, s.obCache, maxAge)
+		readyPct := float64(len(ready)) / float64(len(symbols)) * 100
+		if readyPct >= minReadyPct {
+			if len(ready) < len(symbols) {
+				log.Printf("[WS WARN] Order-book warmup partial: %d/%d symbols fresh (%.1f%%), continuing with fresh symbols", len(ready), len(symbols), readyPct)
+			}
+			return ready, nil
 		}
+
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("order book warmup timeout: not all selected symbols have fresh snapshots")
+			return nil, fmt.Errorf("order book warmup timeout: only %d/%d selected symbols have fresh snapshots (%.1f%%, minimum %.1f%%)", len(ready), len(symbols), readyPct, minReadyPct)
 		case <-ticker.C:
 		}
 	}
+}
+
+func freshOrderBookSymbols(symbols []string, cache *bybit.OrderBookCache, maxAge time.Duration) []string {
+	ready := make([]string, 0, len(symbols))
+	for _, symbol := range symbols {
+		if cache.Age(symbol) <= maxAge {
+			ready = append(ready, symbol)
+		}
+	}
+	return ready
 }
 
 func (s *Service) hasEnoughKlines(symbol string) bool {

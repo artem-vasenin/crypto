@@ -18,7 +18,9 @@
     "open_interest_limit": 24,
     "funding_limit": 20,
     "order_book_limit": 50,
-    "max_data_age_seconds": 30
+    "max_data_age_seconds": 30,
+    "min_order_book_ready_pct": 80,
+    "order_book_warmup_timeout_sec": 5
   },
   "execution": {
     "testnet": false,

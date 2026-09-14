@@ -579,3 +579,109 @@ Trailing не должен сужать первоначальный струк�
 `price_vs_ema10_15m_pct` рассчитывается по EMA10 закрытых 15m свечей.
 
 Поля, для которых достоверное значение отсутствует, не должны использоваться как подтверждённый сигнал. BTC 15m trend в trade snapshot является nullable: если public ticker stream ещё не дал пригодного значения, JSON содержит `null`, а не ложный `0`.
+
+# 17. Public WebSocket reliability
+
+Public WebSocket является источником live order book и обновлений свечей.
+
+## 17.1 Актуальный universe подписок
+
+`PublicWSStream` хранит только текущий набор topics.
+
+Каждый screening cycle:
+
+```text
+новый preselected universe
+        │
+        ├── старые topics → unsubscribe
+        └── новые topics  → subscribe
+```
+
+Старые topics не должны накапливаться от цикла к циклу.
+
+После reconnect повторно подписывается только текущий universe.
+
+## 17.2 Partial order-book warmup
+
+Скринер больше не требует свежий order book от каждого предварительно выбранного символа.
+
+Параметры:
+
+```text
+max_data_age_seconds
+min_order_book_ready_pct
+order_book_warmup_timeout_sec
+```
+
+По умолчанию:
+
+```text
+max_data_age_seconds = 30s
+min_order_book_ready_pct = 80%
+order_book_warmup_timeout_sec = 5s
+```
+
+Если 60 символов предварительно выбраны и свежи 55:
+
+```text
+55 / 60 = 91.7%
+```
+
+анализ продолжается только для этих 55.
+
+Если свежи только 40:
+
+```text
+40 / 60 = 66.7%
+```
+
+цикл завершается ошибкой, потому что качество market-data недостаточно.
+
+Это принципиально отличается от старого поведения:
+
+```text
+59 / 60 fresh → весь cycle ERROR
+```
+
+Один проблемный символ больше не блокирует весь screener.
+
+## 17.3 Subscription diagnostics
+
+Public WebSocket обрабатывает command responses Bybit для:
+
+- `subscribe`;
+- `unsubscribe`.
+
+При ошибке логируются конкретные `failTopics`, если Bybit их возвращает.
+
+Это позволяет отличить:
+
+```text
+subscription failed
+```
+
+от:
+
+```text
+subscription successful, but snapshot has not arrived yet
+```
+
+## 17.4 Freshness и bot safety
+
+Partial warmup не означает разрешение торговать старым JSON.
+
+Цепочка остаётся:
+
+```text
+WS market data
+    ↓
+valid screening cycle
+    ↓
+new screening JSON
+    ↓
+max_screening_age = 3m
+    ↓
+bot safety check
+```
+
+Если screener не смог получить минимально необходимую долю свежих данных, JSON не обновляется, а bot после истечения `max_screening_age` не открывает новую позицию.

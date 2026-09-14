@@ -756,3 +756,54 @@ LH+HL = conflict 0
 - расстояние до local resistance <= max(0.5 * ATR1h%, 0.25%).
 
 Это не утверждение, что такой вход всегда плох. Это временный research-gate, позволяющий не повторять очевидный класс поздних входов до накопления статистики.
+
+# Дополнительный аудит — устойчивость screener WebSocket
+
+## HIGH
+
+### 31. Один stale order book останавливал весь screening cycle
+
+В старой реализации `ensureMarketData` требовал свежий order book для **всех** предварительно выбранных символов.
+
+При 60 символах один отсутствующий snapshot приводил к:
+
+```text
+warmup timeout
+→ screening JSON не обновлён
+→ bot получает старый snapshot
+→ после max_screening_age новые сделки блокируются
+```
+
+Это была инфраструктурная проблема screener, а не ошибка directional strategy.
+
+**Исправление:** введён partial warmup. По умолчанию достаточно 80% свежих order books. Неготовые символы исключаются только из текущего анализа.
+
+### 32. Public WebSocket накапливал старые subscriptions
+
+`subTopics` раньше только добавлял новые topics и никогда не удалял старые.
+
+Следствие: после нескольких screening cycles WebSocket мог содержать topics уже не входящих в текущий universe.
+
+**Исправление:** текущий набор topics полностью синхронизируется с текущим preselected universe через `unsubscribe`/`subscribe`. После reconnect используется только актуальный набор.
+
+### 33. Ответы Bybit на subscribe/unsubscribe не диагностировались
+
+Старый код игнорировал command responses public WebSocket.
+
+Поэтому ошибка вида:
+
+```text
+order book warmup timeout
+```
+
+не показывала, был ли topic действительно подписан.
+
+**Исправление:** обрабатываются ответы `subscribe`/`unsubscribe`, включая `success`, `ret_msg`, `failTopics` и `successTopics`.
+
+### 34. Защита bot от stale screening сохранена
+
+Partial warmup не является поводом разрешать старый screening JSON.
+
+`execution.max_screening_age = 3m` остаётся последней защитой bot.
+
+Если screener не достигает минимального качества market data, текущий JSON не заменяется.

@@ -440,6 +440,11 @@ journalctl -u bot-long -u bot-short -p err --since "1 hour ago" --no-pager
 ```
 ⸻
 
+Забрать снепшоты себе на мак
+```bash
+scp -r root@217.12.40.150:/opt/trading-bot/snapshots ~/Downloads/
+```
+
 Я бы себе сохранил вот эту небольшую шпаргалку
 
 # === SCREENER ===
@@ -455,3 +460,34 @@ systemctl status bot-long bot-short --no-pager
 # === BOT LOGS ===
 journalctl -u bot-long -u bot-short -n 100 --no-pager
 journalctl -u bot-long -u bot-short -f
+## Надёжность public WebSocket screener
+
+Скринер использует один public linear WebSocket для order book и свечей предварительно выбранных символов.
+
+На каждом screening cycle набор подписок заменяется на **текущий universe**, а не накапливается. Старые topics удаляются через `unsubscribe`, новые добавляются через `subscribe`. При реконнекте подписывается только актуальный набор topics.
+
+Order book больше не работает по принципу `all-or-nothing`:
+
+- `max_data_age_seconds` определяет максимальный возраст свежего order book;
+- `min_order_book_ready_pct` определяет минимальную долю предварительно выбранных символов, которая должна иметь свежий order book;
+- `order_book_warmup_timeout_sec` ограничивает ожидание первичных snapshots;
+- символы без свежего order book исключаются из текущего анализа, но не блокируют остальные.
+
+Текущие значения по умолчанию:
+
+```json
+"analysis": {
+  "order_book_limit": 50,
+  "max_data_age_seconds": 30,
+  "min_order_book_ready_pct": 80,
+  "order_book_warmup_timeout_sec": 5
+}
+```
+
+Например, для 60 предварительно выбранных символов при `80%` достаточно 48 свежих order books. Если готовы 55, скринер продолжает работу по этим 55 символам.
+
+Если минимальная доля не достигнута до timeout, screening cycle считается неуспешным и старый JSON не перезаписывается. Это сохраняет защиту бота от торговли по устаревшему screening snapshot.
+
+Public WebSocket также обрабатывает ответы Bybit на `subscribe`/`unsubscribe` и пишет в лог `failTopics`, чтобы можно было увидеть конкретные проблемные topics, а не только общий timeout.
+
+Bybit допускает динамические subscribe/unsubscribe для public topics и рекомендует heartbeat каждые 20 секунд; текущая реализация сохраняет heartbeat 20 секунд.
