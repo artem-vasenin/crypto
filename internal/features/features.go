@@ -9,6 +9,8 @@ import (
 )
 
 // ExtractTimeframe превращает свечи в объективные признаки без торгового решения.
+// Помимо локального trend context здесь рассчитывается rolling equilibrium: он нужен Grid,
+// чтобы не путать частые колебания с диапазоном, который целиком переезжает вверх/вниз.
 func ExtractTimeframe(tf string, c []domain.Candle) domain.TimeframeFeatures {
 	f := domain.TimeframeFeatures{Timeframe: tf, Bars: len(c), Structure: structure.Classify(c, 2)}
 	if len(c) < 60 {
@@ -26,15 +28,14 @@ func ExtractTimeframe(tf string, c []domain.Candle) domain.TimeframeFeatures {
 	f.PlusDI, f.MinusDI, f.ADX = indicator.DMIADX(h, l, cl, 14)
 	f.Efficiency = indicator.EfficiencyRatio(cl, 24)
 	f.Center = indicator.SMA(cl, 48)
-	old := 0.0
 	if len(cl) >= 96 {
-		old = indicator.SMA(cl[len(cl)-48:], 48)
-		old2 := indicator.SMA(cl[:len(cl)-48], min(48, len(cl)-48))
-		if old2 > 0 {
-			f.CenterDriftPct = 100 * (old - old2) / old2
+		newCenter := indicator.SMA(cl[len(cl)-48:], 48)
+		oldCenter := indicator.SMA(cl[len(cl)-96:len(cl)-48], 48)
+		if oldCenter > 0 {
+			f.CenterDriftPct = 100 * (newCenter - oldCenter) / oldCenter
 		}
 		if f.ATR > 0 {
-			f.CenterDriftATR = (old - old2) / f.ATR
+			f.CenterDriftATR = (newCenter - oldCenter) / f.ATR
 		}
 	}
 	base := cl[len(cl)-13]
@@ -46,7 +47,83 @@ func ExtractTimeframe(tf string, c []domain.Candle) domain.TimeframeFeatures {
 	if prior > 0 {
 		f.VolumeRatio = recentV / prior
 	}
+	applyEquilibriumFeatures(&f, h, l, cl)
 	return f
+}
+
+// applyEquilibriumFeatures оценивает миграцию midpoint, изменение ширины range и возвраты к центру.
+// Окно 48 баров намеренно одинаково в барах: смысл признака нормализуется timeframe и ATR,
+// а thresholds остаются калибруемыми и не являются универсальными статистическими константами.
+func applyEquilibriumFeatures(f *domain.TimeframeFeatures, high, low, close []float64) {
+	const window = 48
+	if len(close) < window*2 {
+		return
+	}
+	oldH, oldL := bounds(high[len(high)-window*2:len(high)-window], low[len(low)-window*2:len(low)-window])
+	newH, newL := bounds(high[len(high)-window:], low[len(low)-window:])
+	oldMid, newMid := (oldH+oldL)/2, (newH+newL)/2
+	oldWidth, newWidth := oldH-oldL, newH-newL
+	if oldMid > 0 {
+		f.RollingMidDriftPct = 100 * (newMid - oldMid) / oldMid
+	}
+	if f.ATR > 0 {
+		f.RollingMidDriftATR = (newMid - oldMid) / f.ATR
+	}
+	if newMid > 0 {
+		f.RangeWidthPct = 100 * newWidth / newMid
+	}
+	if oldWidth > 0 {
+		f.RangeWidthChangePct = 100 * (newWidth - oldWidth) / oldWidth
+	}
+	f.MidpointCrossings, f.MeanReversionRatio = meanReversion(close[len(close)-window:], newMid, newWidth)
+}
+
+// bounds возвращает high/low окна без зависимости от торгового направления.
+func bounds(high, low []float64) (float64, float64) {
+	hi, lo := high[0], low[0]
+	for i := 1; i < len(high); i++ {
+		if high[i] > hi {
+			hi = high[i]
+		}
+		if low[i] < lo {
+			lo = low[i]
+		}
+	}
+	return hi, lo
+}
+
+// meanReversion считает пересечения midpoint и долю значимых excursions, вернувшихся к центру.
+// Excursion считается значимым после удаления минимум на 20% ширины текущего range от midpoint.
+func meanReversion(close []float64, midpoint, width float64) (float64, float64) {
+	if len(close) < 2 || width <= 0 {
+		return 0, 0
+	}
+	crossings, excursions, returns := 0, 0, 0
+	threshold := width * 0.20
+	state := 0
+	for i := 1; i < len(close); i++ {
+		prev, cur := close[i-1]-midpoint, close[i]-midpoint
+		if (prev < 0 && cur >= 0) || (prev > 0 && cur <= 0) {
+			crossings++
+		}
+		if state == 0 {
+			if cur >= threshold {
+				state = 1
+				excursions++
+			}
+			if cur <= -threshold {
+				state = -1
+				excursions++
+			}
+		} else if (state == 1 && cur <= 0) || (state == -1 && cur >= 0) {
+			returns++
+			state = 0
+		}
+	}
+	if excursions == 0 {
+		return float64(crossings), 0
+	}
+	return float64(crossings), float64(returns) / float64(excursions)
 }
 
 // ClassifyMarket формирует direction/strength/dynamics и явно сохраняет MTF conflict.
@@ -64,8 +141,7 @@ func ClassifyMarket(s *domain.MarketSnapshot, c config.Config) {
 	bear := func(x domain.TimeframeFeatures) bool {
 		return x.Structure == domain.StructureBear && x.CenterDriftATR < -c.Thresholds.DriftATRWeak && x.MinusDI > x.PlusDI
 	}
-	bu := []bool{bull(a), bull(b), bull(d)}
-	be := []bool{bear(a), bear(b), bear(d)}
+	bu, be := []bool{bull(a), bull(b), bull(d)}, []bool{bear(a), bear(b), bear(d)}
 	bc, sc := count(bu), count(be)
 	if bc >= 2 && sc == 0 {
 		s.Direction = domain.DirectionUp
@@ -94,8 +170,7 @@ func ClassifyMarket(s *domain.MarketSnapshot, c config.Config) {
 	} else {
 		s.Strength = domain.StrengthWeak
 	}
-	short := a
-	long := b
+	short, long := a, b
 	if math.Abs(short.CenterDriftATR) > math.Abs(long.CenterDriftATR)*1.25 || short.ADX > long.ADX+5 {
 		s.Dynamics = domain.DynamicsAccelerating
 	} else if math.Abs(short.CenterDriftATR)*1.25 < math.Abs(long.CenterDriftATR) && short.ADX+5 < long.ADX {
@@ -113,10 +188,4 @@ func count(v []bool) int {
 		}
 	}
 	return n
-}
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

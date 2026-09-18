@@ -16,6 +16,12 @@
     "efficiency_trend": 0.32,
     "atr_expansion_ratio": 1.18,
     "volume_expansion_ratio": 1.25,
-    "mtf_conflict_block": true
+    "mtf_conflict_block": true,
+    "grid_rolling_mid_drift_pct_max": 3.0,
+    "grid_rolling_mid_drift_atr_max": 1.5,
+    "grid_range_expansion_pct_max": 35.0,
+    "grid_efficiency_max": 0.55,
+    "grid_min_midpoint_crossings": 2,
+    "grid_min_mean_reversion_ratio": 0.45
   }
 }

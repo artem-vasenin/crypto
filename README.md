@@ -4,7 +4,7 @@
 
 ## Основная идея
 
-Один общий движок собирает публичные данные Bybit и формирует `MarketSnapshot`: направление, силу, динамику, MTF-согласованность и объективные features. После этого snapshot независимо интерпретируется профилем FUTURES или GRID. Единого score нет: допуск построен как иерархия hard gates, primary evidence, confirmations и risk flags.
+Один общий движок собирает публичные данные Bybit и формирует `MarketSnapshot`: направление, силу, динамику, MTF-согласованность и объективные features. Начиная с v1.1 Grid дополнительно получает rolling equilibrium features: миграцию midpoint, изменение ширины range, число пересечений midpoint и долю значимых возвратов к центру. После этого snapshot независимо интерпретируется профилем FUTURES или GRID. Единого score нет: допуск построен как иерархия hard gates, primary evidence, confirmations и risk flags.
 
 ## Требования
 
@@ -53,7 +53,7 @@ go run ./cmd/screener --config ./my-config.json --mode grid
 
 ## Конфигурация
 
-`configs.json` задаёт URL Bybit, output directory, минимальный 24h turnover, глубину истории, concurrency, reference capital для Grid и thresholds. Thresholds не являются весами score: это независимые границы hard/primary правил.
+`configs.json` задаёт URL Bybit, output directory, минимальный 24h turnover, глубину истории, concurrency, reference capital для Grid и thresholds. Thresholds не являются весами score: это независимые границы hard/primary правил. Grid thresholds отдельно ограничивают rolling midpoint drift, range expansion, directional efficiency и требуют минимальное качество mean reversion.
 
 `grid_max_price_usdt` — дополнительный практический ограничитель v1. Главная capital-проверка использует `minNotional/minOrderQty` и reference capital; в дальнейшем абсолютный price cap можно ослабить/удалить после валидации.
 
@@ -86,7 +86,7 @@ go run ./cmd/screener --config ./my-config.json --mode grid
 - `Strength` — WEAK/MODERATE/STRONG/UNKNOWN.
 - `Dynamics` — ACCELERATING/STABLE/DECELERATING/UNKNOWN.
 - `StructureState` — HH_HL/LH_LL/MIXED/UNKNOWN.
-- `TimeframeFeatures` — признаки отдельного TF.
+- `TimeframeFeatures` — признаки отдельного TF, включая rolling midpoint drift, изменение ширины range, midpoint crossings и mean-reversion ratio.
 - `MarketSnapshot` — единое объективное описание монеты до strategy interpretation.
 - `Candidate` — объяснимый допущенный кандидат.
 - `ScreeningFile` — контракт выходного JSON.
@@ -120,7 +120,10 @@ go run ./cmd/screener --config ./my-config.json --mode grid
 
 ### `internal/features/features.go`
 Общее аналитическое ядро.
-- `ExtractTimeframe(tf, candles)` — ATR%, DMI/ADX, efficiency, center/drift, momentum, volume ratio, structure.
+- `ExtractTimeframe(tf, candles)` — ATR%, DMI/ADX, efficiency, center/drift, momentum, volume ratio, structure и equilibrium features.
+- `applyEquilibriumFeatures(features, high, low, close)` — rolling midpoint/range migration и mean-reversion statistics.
+- `bounds(high, low)` — high/low заданного rolling-окна.
+- `meanReversion(close, midpoint, width)` — midpoint crossings и доля завершённых возвратов после значимых excursions.
 - `ClassifyMarket(snapshot, config)` — формирует Direction/Strength/Dynamics/MTF без aggregate score.
 - `count([]bool)` — helper подсчёта подтверждений одного типа.
 - `min(a, b)` — helper окна.
@@ -132,7 +135,7 @@ go run ./cmd/screener --config ./my-config.json --mode grid
 ### `internal/screening/screening.go`
 Иерархические strategy gates.
 - `Futures(snapshot, direction, config)` — hard gates и evidence для FUTURES LONG/SHORT.
-- `Grid(snapshot, direction, instrument, config)` — сначала grid compatibility/capital gates, затем LONG_GRID/SHORT_GRID candidate.
+- `Grid(snapshot, direction, instrument, config)` — сначала hard gates equilibrium stability (rolling drift/range expansion/mean reversion), затем capital suitability и LONG_GRID/SHORT_GRID candidate.
 - `gridCapitalSuitable(price, instrument, config)` — проверяет, помещается ли минимально полезное число grid orders в reference capital.
 - `base(snapshot)` — создаёт общий Candidate и переносит explainability/risk context.
 
@@ -162,8 +165,19 @@ go run ./cmd/screener --config ./my-config.json --mode grid
 - `cfg()` — тестовая конфигурация.
 - `TestFuturesRejectConflict` — MTF conflict невозможно компенсировать другими плюсами.
 - `TestGridRejectStrongAcceleration` — сильный accelerating regime является hard block для Grid.
+- `TestGridRejectRollingMidpointDrift` — drifting equilibrium нельзя компенсировать правильным LONG/SHORT направлением.
+- `TestGridRejectRangeExpansion` — опасное расширение rolling range блокирует Grid.
+- `TestGridRejectPoorMeanReversion` — колебания без достаточных возвратов к midpoint не считаются хорошим Grid regime.
+- `TestGridAcceptStationaryDirectionalRange` — положительный stationary-range сценарий защищает от модели «всегда NO_GRID».
+
+### `internal/features/features_test.go`
+- `candlesRange(...)` — deterministic генератор синтетического range для тестов.
+- `TestEquilibriumStationaryRange` — stationary range имеет малый midpoint drift и повторные возвраты.
+- `TestEquilibriumDetectsMigratingRange` — движущийся range распознаётся как drifting.
 
 ## Что v1 намеренно не делает
+
+Текущая версия: **v1.1.0**. Первое исправление после live-валидации: ADAUSDT была ошибочно пропущена в LONG-GRID при Deep Analyzer `TRENDING_EXPANSION/drifting`. Поэтому Grid hard gates теперь анализируют rolling equilibrium, а не только локальный center drift.
 
 Нет Neutral Grid, БД, execution, Virtual Trader, автоматического leverage, grid range/SL/TP, полноценного WAIT/TRIGGER engine, historical replay и тяжёлой микроструктуры. Это сознательно ограниченный первый проект: сначала требуется проверить качество направления/силы и первичного отбора.
 

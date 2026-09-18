@@ -51,7 +51,7 @@ MTF: `ALIGNED`, `TRANSITION`, `CONFLICT`, `MIXED`.
 
 Grid suitability не равна directional suitability. Сильный accelerating trend может быть хорошим FUTURES candidate и одновременно `NO_GRID`.
 
-Grid v1 проверяет направление, отсутствие MTF conflict, отсутствие сильного ускоряющегося режима, ограничивает чрезмерный normalized center drift/efficiency и проверяет capital suitability. Это начальная консервативная реализация, а не окончательная модель entry/range/SL.
+Grid v1.1 проверяет направление и MTF, но до допуска применяет отдельные hard gates equilibrium stability: rolling midpoint drift в % и ATR, изменение rolling range width, directional efficiency, midpoint crossings и mean-reversion ratio. Только после этого проверяется capital suitability. Это начальная консервативная реализация, а не окончательная модель entry/range/SL.
 
 Будущая эволюция Grid должна идти по цепочке `GRID_ELIGIBILITY -> SETUP -> WAIT/TRIGGER -> READY_FOR_DEEP_ANALYSIS`. Boundary proximity сама по себе не trigger.
 
@@ -59,7 +59,9 @@ Grid v1 проверяет направление, отсутствие MTF conf
 
 Регрессионные кейсы из предыдущей системы: AVAXUSDT, WIFUSDT, 1000PEPEUSDT, VVVUSDT SHORT-grid. Общий pathology: положительный impulse/recovery ошибочно принимался за возможность SHORT; локальные fills существовали, но equilibrium двигался вверх. VVV особенно показывает `local oscillation quality high, equilibrium stability bad`. PEPE показывает `pullback != reversal`. WIF/AVAX показывают HTF lag.
 
-Когда появятся T0 fixtures этих сделок, добавить replay tests без future leakage. Не использовать текущий order book/recent trades как исторические данные T0.
+Первый live regression-кейс новой версии — ADAUSDT 18.09.2026: Screener v1.0 пропустил LONG-GRID, тогда как Deep Analyzer показал `TRENDING_EXPANSION`, rolling midpoint drift около +6.75%, range width expansion около +52.9% и `NO_GRID_REGIME`. Исправление v1.1 добавило rolling equilibrium hard gates. ADA нельзя превращать в symbol-specific правило или копировать thresholds Deep Analyzer вслепую.
+
+Когда появятся T0 fixtures исторических сделок, добавить replay tests без future leakage. Не использовать текущий order book/recent trades как исторические данные T0.
 
 ## 8. Evidence quality
 
@@ -74,7 +76,7 @@ Missing/insufficient data не трактуется как 0 или нейтра
 - `internal/universe` — дешёвые предварительные фильтры.
 - `internal/indicator` — атомарная математика индикаторов.
 - `internal/structure` — swing/HH-HL/LH-LL classification.
-- `internal/features` — feature extraction и market classification.
+- `internal/features` — feature extraction, rolling equilibrium/mean-reversion statistics и market classification.
 - `internal/marketdata` — сбор MarketSnapshot.
 - `internal/screening` — hierarchical strategy gates FUTURES/GRID.
 - `internal/output` — JSON serialization.
@@ -98,4 +100,4 @@ Missing/insufficient data не трактуется как 0 или нейтра
 
 ## 12. Definition of Done для следующих итераций
 
-При развитии проекта сохранять: корректное направление важнее точности точки входа; conflicting data не выходит в shortlist; Grid способен блокировать drifting/expanding equilibrium; Futures не блокируется только из-за высокой абсолютной цены; output объясним; tests deterministic; Deep Analyzer получает shortlist, а не OPEN-команду.
+При развитии проекта сохранять: корректное направление важнее точности точки входа; conflicting data не выходит в shortlist; Grid способен блокировать drifting/expanding equilibrium и плохую mean reversion; Futures не блокируется только из-за высокой абсолютной цены; output объясним; tests deterministic; Deep Analyzer получает shortlist, а не OPEN-команду.

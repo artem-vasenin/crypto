@@ -64,9 +64,10 @@ const (
 
 // TimeframeFeatures хранит независимые признаки одного таймфрейма.
 type TimeframeFeatures struct {
-	Timeframe                                                                                                                  string         `json:"timeframe"`
-	Bars                                                                                                                       int            `json:"bars"`
-	LastPrice, ATR, ATRPct, ADX, PlusDI, MinusDI, Efficiency, Center, CenterDriftPct, CenterDriftATR, MomentumPct, VolumeRatio float64        `json:",omitempty"`
+	Timeframe                                                                                                                  string `json:"timeframe"`
+	Bars                                                                                                                       int    `json:"bars"`
+	LastPrice, ATR, ATRPct, ADX, PlusDI, MinusDI, Efficiency, Center, CenterDriftPct, CenterDriftATR, MomentumPct, VolumeRatio float64
+	RollingMidDriftPct, RollingMidDriftATR, RangeWidthPct, RangeWidthChangePct, MidpointCrossings, MeanReversionRatio          float64        `json:",omitempty"`
 	Structure                                                                                                                  StructureState `json:"structure"`
 }
 

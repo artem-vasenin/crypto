@@ -8,14 +8,20 @@ import (
 
 // Thresholds содержит калибруемые границы. Они не образуют интегральный score.
 type Thresholds struct {
-	DriftATRWeak         float64 `json:"drift_atr_weak"`
-	DriftATRStrong       float64 `json:"drift_atr_strong"`
-	ADXTrend             float64 `json:"adx_trend"`
-	ADXStrong            float64 `json:"adx_strong"`
-	EfficiencyTrend      float64 `json:"efficiency_trend"`
-	ATRExpansionRatio    float64 `json:"atr_expansion_ratio"`
-	VolumeExpansionRatio float64 `json:"volume_expansion_ratio"`
-	MTFConflictBlock     bool    `json:"mtf_conflict_block"`
+	DriftATRWeak              float64 `json:"drift_atr_weak"`
+	DriftATRStrong            float64 `json:"drift_atr_strong"`
+	ADXTrend                  float64 `json:"adx_trend"`
+	ADXStrong                 float64 `json:"adx_strong"`
+	EfficiencyTrend           float64 `json:"efficiency_trend"`
+	ATRExpansionRatio         float64 `json:"atr_expansion_ratio"`
+	VolumeExpansionRatio      float64 `json:"volume_expansion_ratio"`
+	GridRollingMidDriftPctMax float64 `json:"grid_rolling_mid_drift_pct_max"`
+	GridRollingMidDriftATRMax float64 `json:"grid_rolling_mid_drift_atr_max"`
+	GridRangeExpansionPctMax  float64 `json:"grid_range_expansion_pct_max"`
+	GridEfficiencyMax         float64 `json:"grid_efficiency_max"`
+	GridMinMidpointCrossings  float64 `json:"grid_min_midpoint_crossings"`
+	GridMinMeanReversionRatio float64 `json:"grid_min_mean_reversion_ratio"`
+	MTFConflictBlock          bool    `json:"mtf_conflict_block"`
 }
 
 // Config содержит эксплуатационные настройки приложения.
