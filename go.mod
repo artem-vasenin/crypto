@@ -1,3 +1,3 @@
-module crypto
+module candidate-screener
 
-go 1.26.5
+go 1.23

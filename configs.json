@@ -1,0 +1,21 @@
+{
+  "bybit_base_url": "https://api.bybit.com",
+  "output_dir": "output",
+  "min_turnover_24h_usdt": 5000000,
+  "min_history_bars": 180,
+  "max_concurrency": 8,
+  "request_timeout_seconds": 15,
+  "grid_reference_capital_usdt": 50,
+  "grid_min_levels": 8,
+  "grid_max_price_usdt": 250,
+  "thresholds": {
+    "drift_atr_weak": 0.35,
+    "drift_atr_strong": 0.9,
+    "adx_trend": 22,
+    "adx_strong": 30,
+    "efficiency_trend": 0.32,
+    "atr_expansion_ratio": 1.18,
+    "volume_expansion_ratio": 1.25,
+    "mtf_conflict_block": true
+  }
+}
