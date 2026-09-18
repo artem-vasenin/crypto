@@ -6,3 +6,4 @@ configs/config.test.json
 .env.test
 analyzer
 screener
+coin-analyzer
