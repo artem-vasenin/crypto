@@ -1,47 +1,79 @@
 package analysis
 
 import (
-	"context"
+	"crypto-coin-analyzer/internal/bybit"
 	"testing"
 	"time"
-
-	"crypto-coin-analyzer/internal/bybit"
 )
 
-type fakeAPI struct{}
+// TestStructureCoordinates проверяет принципиальное свойство v3.1: структура должна сопровождаться
+// реальными координатами swing points, а не быть непрозрачным текстовым label.
+func TestStructureCoordinates(t *testing.T) {
+	base := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	highs := []float64{10, 11, 14, 11, 10, 12, 15, 12, 11, 13, 16, 13, 12}
+	lows := []float64{9, 10, 11, 8, 9, 10, 12, 9, 10, 11, 13, 10, 11}
+	c := make([]bybit.Candle, len(highs))
+	for i := range c {
+		c[i] = bybit.Candle{Time: base.Add(time.Duration(i) * time.Hour), High: highs[i], Low: lows[i], Open: (highs[i] + lows[i]) / 2, Close: (highs[i] + lows[i]) / 2}
+	}
+	s := structure(c, 1)
+	if len(s.LastSwings) < 4 {
+		t.Fatalf("ожидались swing coordinates, получено %d", len(s.LastSwings))
+	}
+	if s.SwingHighSequence == "unknown" || s.SwingLowSequence == "unknown" {
+		t.Fatalf("структура не определена: %+v", s)
+	}
+}
 
-func (fakeAPI) Ticker(context.Context, string) (bybit.Ticker, error) {
-	return bybit.Ticker{Symbol: "TESTUSDT", LastPrice: 100, Price24hPct: 2, Turnover24h: 10_000_000, Volume24h: 100_000, FundingRate: 0.0001, OpenInterest: 1_000_000, BidPrice: 99.99, AskPrice: 100.01}, nil
-}
-func (fakeAPI) Klines(context.Context, string, string, int) ([]bybit.Candle, error) {
-	out := make([]bybit.Candle, 220)
-	for i := range out {
-		v := 100 + float64(i)*0.01
-		out[i] = bybit.Candle{Time: time.Unix(int64(i*60), 0), Open: v, High: v + 0.5, Low: v - 0.5, Close: v + 0.1, Volume: float64(100 + i)}
+// TestDriftingRangeIsNotGridCandidate фиксирует защиту от старой ошибки: moving range не должен
+// становиться хорошим GRID только из-за большого числа локальных колебаний.
+func TestDriftingRangeIsNotGridCandidate(t *testing.T) {
+	base := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	c := make([]bybit.Candle, 192)
+	for i := range c {
+		center := 100 + float64(i)*0.03
+		wave := float64((i%8)-4) * 0.08
+		c[i] = bybit.Candle{Time: base.Add(time.Duration(i) * 15 * time.Minute), Open: center + wave, Close: center - wave, High: center + 0.6, Low: center - 0.6, Volume: 100}
 	}
-	return out, nil
-}
-func (fakeAPI) Funding(context.Context, string, int) ([]bybit.Funding, error) {
-	return []bybit.Funding{{Rate: 0.0001}}, nil
-}
-func (fakeAPI) OpenInterest(context.Context, string, string, int) ([]bybit.OpenInterest, error) {
-	return []bybit.OpenInterest{{Value: 100}, {Value: 110}}, nil
-}
-func (fakeAPI) LongShort(context.Context, string, string, int) ([]bybit.LongShort, error) {
-	return []bybit.LongShort{{BuyRatio: 0.55, SellRatio: 0.45}}, nil
-}
-func (fakeAPI) OrderBook(context.Context, string, int) (bybit.OrderBook, error) {
-	return bybit.OrderBook{BidNotional: 1000, AskNotional: 900, ImbalancePct: 5.26, Ratio: 1.11, Levels: 200}, nil
-}
-func TestBuild(t *testing.T) {
-	r, err := Build(context.Background(), fakeAPI{}, "TESTUSDT", 1)
-	if err != nil {
-		t.Fatal(err)
+	r := analyzeRange(c)
+	if r.Stationarity != "drifting" {
+		t.Fatalf("ожидался drifting range, получено %s drift=%.2f", r.Stationarity, r.RollingMidDriftPct)
 	}
-	if r.Symbol != "TESTUSDT" || r.Market.Price != 100 {
-		t.Fatalf("bad report: %+v", r)
+}
+
+// TestFlowWindowRequiresFullCoverage не позволяет выдавать 5m/15m taker delta,
+// если endpoint recent-trade фактически вернул только короткий snapshot.
+func TestFlowWindowRequiresFullCoverage(t *testing.T) {
+	base := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	tr := []bybit.Trade{
+		{Time: base, Price: 100, Size: 1, Side: "Buy"},
+		{Time: base.Add(30 * time.Second), Price: 101, Size: 1, Side: "Sell"},
 	}
-	if r.AIInstructions.Task == "" {
-		t.Fatal("missing AI instructions")
+	one := flow(tr, time.Minute)
+	if one.Available || one.Status != "insufficient_data" {
+		t.Fatalf("30 секунд не должны изображать полное 1m окно: %+v", one)
+	}
+	tr = append(tr, bybit.Trade{Time: base.Add(6 * time.Minute), Price: 102, Size: 2, Side: "Buy"})
+	five := flow(tr, 5*time.Minute)
+	if !five.Available || five.Status != "complete_window" {
+		t.Fatalf("ожидалось полноценное 5m окно: %+v", five)
+	}
+}
+
+// TestOutsideBarDoesNotDefineStructure проверяет, что свеча, являющаяся одновременно pivot high и low,
+// остаётся видимой в evidence, но не искажает последовательности HH/HL/LH/LL.
+func TestOutsideBarDoesNotDefineStructure(t *testing.T) {
+	base := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	c := []bybit.Candle{
+		{Time: base, High: 10, Low: 9},
+		{Time: base.Add(time.Hour), High: 12, Low: 7}, // outside pivot: и high, и low
+		{Time: base.Add(2 * time.Hour), High: 10, Low: 9},
+	}
+	s := structure(c, 1)
+	if len(s.LastSwings) != 2 || !s.LastSwings[0].Ambiguous || !s.LastSwings[1].Ambiguous {
+		t.Fatalf("outside-bar должен быть явно маркирован двумя evidence points: %+v", s.LastSwings)
+	}
+	if s.SwingHighSequence != "unknown" || s.SwingLowSequence != "unknown" {
+		t.Fatalf("один ambiguous outside-bar не должен формировать структуру: %+v", s)
 	}
 }

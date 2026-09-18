@@ -1,187 +1,237 @@
+// Package analysis описывает evidence-first JSON-отчёт универсального анализатора.
 package analysis
 
-import "time"
+import (
+	"crypto-coin-analyzer/internal/bybit"
+	"time"
+)
 
-type Report struct {
-	GeneratedAt    time.Time      `json:"generated_at"`
-	Exchange       string         `json:"exchange"`
-	Category       string         `json:"category"`
-	Symbol         string         `json:"symbol"`
-	Purpose        string         `json:"purpose"`
-	DataQuality    DataQuality    `json:"data_quality"`
-	Market         Market         `json:"market"`
-	Indicators     Indicators     `json:"indicators"`
-	Trend          Trend          `json:"trend"`
-	Momentum       Momentum       `json:"momentum"`
-	Volume         Volume         `json:"volume"`
-	Structure      Structure      `json:"structure"`
-	Levels         Levels         `json:"levels"`
-	Derivatives    Derivatives    `json:"derivatives"`
-	OrderBook      OrderBook      `json:"order_book"`
-	BTCContext     BTCContext     `json:"btc_context"`
-	Strategies     Strategies     `json:"strategies"`
-	AIInstructions AIInstructions `json:"ai_instructions"`
+// Request хранит выбранный пользователем режим. Raw evidence от выбора не зависит и сохраняется всегда.
+type Request struct {
+	AnalysisType string `json:"analysis_type"`
+	Direction    string `json:"direction"`
 }
 
+// Report — самодостаточный отчёт по одному символу. В версии 3.1 намеренно нет интегральных score:
+// факторы разной природы нельзя корректно свести простым сложением в одно число без проверенной модели весов.
+type Report struct {
+	SchemaVersion   string                       `json:"schema_version"`
+	AnalyzerVersion string                       `json:"analyzer_version"`
+	GeneratedAt     time.Time                    `json:"generated_at"`
+	Exchange        string                       `json:"exchange"`
+	Category        string                       `json:"category"`
+	Symbol          string                       `json:"symbol"`
+	Request         Request                      `json:"request"`
+	Purpose         string                       `json:"purpose"`
+	DataQuality     DataQuality                  `json:"data_quality"`
+	Market          Market                       `json:"market"`
+	Timeframes      map[string]Timeframe         `json:"timeframes"`
+	Structures      map[string]StructureAnalysis `json:"structures"`
+	MarketRegime    MarketRegime                 `json:"market_regime"`
+	RegimeHistory   []RegimeSnapshot             `json:"regime_history"`
+	Range           RangeAnalysis                `json:"range_analysis"`
+	Grid            GridAnalysis                 `json:"grid_analysis"`
+	Directional     DirectionalAnalysis          `json:"directional_analysis"`
+	Derivatives     Derivatives                  `json:"derivatives"`
+	Microstructure  Microstructure               `json:"microstructure"`
+	BTCContext      BTCContext                   `json:"btc_context"`
+	RawEvidence     RawEvidence                  `json:"raw_evidence"`
+	AIInstructions  AIInstructions               `json:"ai_instructions"`
+}
 type DataQuality struct {
-	OneMinuteCandles int      `json:"one_minute_candles"`
-	Notes            []string `json:"notes,omitempty"`
+	Complete        bool              `json:"complete"`
+	Warnings        []string          `json:"warnings,omitempty"`
+	Counts          map[string]int    `json:"counts"`
+	RequestedDepth  map[string]string `json:"requested_depth"`
+	EvidenceQuality map[string]string `json:"evidence_quality"`
 }
 type Market struct {
-	Price        float64 `json:"price"`
-	Change24hPct float64 `json:"change_24h_pct"`
-	Change3dPct  float64 `json:"change_3d_pct"`
-	Change7dPct  float64 `json:"change_7d_pct"`
-	Turnover24h  float64 `json:"turnover_24h"`
-	Volume24h    float64 `json:"volume_24h"`
-	SpreadPct    float64 `json:"spread_pct"`
+	Price             float64 `json:"price"`
+	Change24hPct      float64 `json:"change_24h_pct"`
+	High24h           float64 `json:"high_24h"`
+	Low24h            float64 `json:"low_24h"`
+	Turnover24h       float64 `json:"turnover_24h"`
+	Volume24h         float64 `json:"volume_24h"`
+	SpreadPct         float64 `json:"spread_pct"`
+	FundingRate       float64 `json:"funding_rate"`
+	OpenInterest      float64 `json:"open_interest"`
+	OpenInterestValue float64 `json:"open_interest_value"`
 }
-type Indicators struct {
-	RSI15m         float64 `json:"rsi_15m"`
-	RSI1h          float64 `json:"rsi_1h"`
-	RSI4h          float64 `json:"rsi_4h"`
-	RSI4h14d       float64 `json:"rsi_4h_14d"` // RSI за 14 дней на 4h
-	RSI4h30d       float64 `json:"rsi_4h_30d"` // RSI за 30 дней на 4h
-	ATR15m         float64 `json:"atr_15m"`
-	ATR1h          float64 `json:"atr_1h"`
-	ATR4h          float64 `json:"atr_4h"`
-	ATR4h14d       float64 `json:"atr_4h_14d"` // ATR за 14 дней
-	ATR4h30d       float64 `json:"atr_4h_30d"` // ATR за 30 дней
-	ATR1hPct       float64 `json:"atr_1h_pct"`
-	ATR4hPct       float64 `json:"atr_4h_pct"`
-	ATR4h14dPct    float64 `json:"atr_4h_14d_pct"` // ATR% за 14 дней
-	ATR4h30dPct    float64 `json:"atr_4h_30d_pct"` // ATR% за 30 дней
-	VolumeRatio1h  float64 `json:"volume_ratio_1h"`
-	VolumeRatio14d float64 `json:"volume_ratio_14d"` // объём 14д vs 7д
+type Timeframe struct {
+	Candles           int     `json:"candles"`
+	ChangePct         float64 `json:"change_pct"`
+	RSI14             float64 `json:"rsi_14"`
+	ATR14             float64 `json:"atr_14"`
+	ATRPct            float64 `json:"atr_pct"`
+	ADX14             float64 `json:"adx_14"`
+	EMA20             float64 `json:"ema_20"`
+	EMA50             float64 `json:"ema_50"`
+	EMA200            float64 `json:"ema_200"`
+	EfficiencyRatio   float64 `json:"efficiency_ratio"`
+	RealizedVolPct    float64 `json:"realized_vol_pct"`
+	BollingerWidthPct float64 `json:"bollinger_width_pct"`
+	VolumeRatio       float64 `json:"volume_ratio"`
+	High              float64 `json:"window_high"`
+	Low               float64 `json:"window_low"`
+	RangePositionPct  float64 `json:"range_position_pct"`
 }
-type Trend struct {
-	EMA20_15m              float64 `json:"ema20_15m"`
-	EMA50_15m              float64 `json:"ema50_15m"`
-	EMA200_15m             float64 `json:"ema200_15m"`
-	EMA20_1h               float64 `json:"ema20_1h"`
-	EMA50_1h               float64 `json:"ema50_1h"`
-	EMA200_1h              float64 `json:"ema200_1h"`
-	EMA20_4h               float64 `json:"ema20_4h"`
-	EMA50_4h               float64 `json:"ema50_4h"`
-	EMA200_4h              float64 `json:"ema200_4h"`
-	EMA20_4h_14d           float64 `json:"ema20_4h_14d"`  // EMA20 за 14 дней
-	EMA50_4h_14d           float64 `json:"ema50_4h_14d"`  // EMA50 за 14 дней
-	EMA200_4h_14d          float64 `json:"ema200_4h_14d"` // EMA200 за 14 дней
-	EMA20_4h_30d           float64 `json:"ema20_4h_30d"`  // EMA20 за 30 дней
-	EMA50_4h_30d           float64 `json:"ema50_4h_30d"`  // EMA50 за 30 дней
-	EMA200_4h_30d          float64 `json:"ema200_4h_30d"` // EMA200 за 30 дней
-	PriceVsEMA20_1hPct     float64 `json:"price_vs_ema20_1h_pct"`
-	PriceVsEMA50_1hPct     float64 `json:"price_vs_ema50_1h_pct"`
-	PriceVsEMA200_1hPct    float64 `json:"price_vs_ema200_1h_pct"`
-	PriceVsEMA20_4h_14dPct float64 `json:"price_vs_ema20_4h_14d_pct"`
-	PriceVsEMA50_4h_14dPct float64 `json:"price_vs_ema50_4h_14d_pct"`
+
+// SwingPoint сохраняет координаты подтверждённого локального экстремума, чтобы ИИ мог проверить label структуры.
+type SwingPoint struct {
+	Time     time.Time `json:"time"`
+	Type     string    `json:"type"`
+	Price    float64   `json:"price"`
+	Strength int       `json:"strength_bars"`
+	// Ambiguous=true означает outside-bar, который одновременно является pivot high и pivot low.
+	// Такая точка сохраняется как raw/derived evidence, но не участвует в HH/HL/LH/LL последовательности.
+	Ambiguous bool `json:"ambiguous_outside_bar"`
 }
-type Momentum struct {
-	Change1hPct  float64 `json:"change_1h_pct"`
-	Change4hPct  float64 `json:"change_4h_pct"`
-	Change12hPct float64 `json:"change_12h_pct"`
-	Change24hPct float64 `json:"change_24h_pct"`
-	Change7dPct  float64 `json:"change_7d_pct"`  // уже есть в market, но дублируем для удобства
-	Change14dPct float64 `json:"change_14d_pct"` // изменение за 14 дней
-	Change30dPct float64 `json:"change_30d_pct"` // изменение за 30 дней
-	ROC1hPct     float64 `json:"roc_1h_pct"`
-	ROC4hPct     float64 `json:"roc_4h_pct"`
-	ROC14dPct    float64 `json:"roc_14d_pct"` // ROC за 14 дней
+type StructureAnalysis struct {
+	Label             string       `json:"label"`
+	SwingHighSequence string       `json:"swing_high_sequence"`
+	SwingLowSequence  string       `json:"swing_low_sequence"`
+	LastSwings        []SwingPoint `json:"last_swings"`
+	Evidence          []string     `json:"evidence"`
+	Conflicts         []string     `json:"conflicts"`
 }
-type Volume struct {
-	Volume5m  float64 `json:"volume_5m"`
-	Volume15m float64 `json:"volume_15m"`
-	Volume1h  float64 `json:"volume_1h"`
-	Ratio5m   float64 `json:"ratio_5m"`
-	Ratio15m  float64 `json:"ratio_15m"`
-	Ratio1h   float64 `json:"ratio_1h"`
+type MarketRegime struct {
+	Classification  string   `json:"classification"`
+	TrendStrength   string   `json:"trend_strength"`
+	VolatilityState string   `json:"volatility_state"`
+	BreakoutRisk    string   `json:"breakout_risk"`
+	DirectionalBias string   `json:"directional_bias"`
+	Evidence        []string `json:"evidence"`
+	Conflicts       []string `json:"conflicts"`
 }
-type Pivot struct {
-	Time  time.Time `json:"time"`
-	Price float64   `json:"price"`
+type RegimeSnapshot struct {
+	Time                 time.Time `json:"time"`
+	LookbackHours        int       `json:"lookback_hours"`
+	Classification       string    `json:"classification"`
+	ADX                  float64   `json:"adx"`
+	EfficiencyRatio      float64   `json:"efficiency_ratio"`
+	ATRPct               float64   `json:"atr_pct"`
+	VolumeRatio          float64   `json:"volume_ratio"`
+	RangeDriftPctPerHour float64   `json:"range_drift_pct_per_hour"`
 }
-type Structure struct {
-	PivotHighs   []Pivot `json:"pivot_highs"`
-	PivotLows    []Pivot `json:"pivot_lows"`
-	HighState    string  `json:"high_state"`
-	LowState     string  `json:"low_state"`
-	PreviousHigh float64 `json:"previous_high"`
-	CurrentHigh  float64 `json:"current_high"`
-	PreviousLow  float64 `json:"previous_low"`
-	CurrentLow   float64 `json:"current_low"`
+
+// RangeAnalysis отделяет геометрию range от его стационарности. Moving channel не должен выглядеть как хороший боковик.
+type RangeAnalysis struct {
+	LookbackHours         int      `json:"lookback_hours"`
+	High                  float64  `json:"high"`
+	Low                   float64  `json:"low"`
+	Mid                   float64  `json:"mid"`
+	WidthPct              float64  `json:"width_pct"`
+	PositionPct           float64  `json:"position_pct"`
+	UpperTouches          int      `json:"upper_touches"`
+	LowerTouches          int      `json:"lower_touches"`
+	MidCrosses            int      `json:"mid_crosses"`
+	FalseBreaksUp         int      `json:"false_breaks_up"`
+	FalseBreaksDown       int      `json:"false_breaks_down"`
+	CloseOutsidePct       float64  `json:"close_outside_pct"`
+	SlopePctPerHour       float64  `json:"mid_slope_pct_per_hour"`
+	RollingMidDriftPct    float64  `json:"rolling_mid_drift_pct"`
+	RollingWidthChangePct float64  `json:"rolling_width_change_pct"`
+	Stationarity          string   `json:"stationarity"`
+	BoundaryBalance       string   `json:"boundary_balance"`
+	Evidence              []string `json:"evidence"`
+	Risks                 []string `json:"risks"`
 }
-type Levels struct {
-	Resistance        []float64 `json:"resistance"`
-	Support           []float64 `json:"support"`
-	NearestResistance float64   `json:"nearest_resistance"`
-	NearestSupport    float64   `json:"nearest_support"`
-	RangeWidthPct     float64   `json:"range_width_pct"`
-	RangePositionPct  float64   `json:"range_position_pct"`
-	RangeToATR1h      float64   `json:"range_to_atr_1h"`
-	PriceDiscovery    bool      `json:"price_discovery"`
-	RecentRangeHigh   float64   `json:"recent_range_high"`
-	RecentRangeLow    float64   `json:"recent_range_low"`
-	// 14-дневные уровни
-	Range14dHigh        float64 `json:"range_14d_high"`
-	Range14dLow         float64 `json:"range_14d_low"`
-	Range14dWidthPct    float64 `json:"range_14d_width_pct"`
-	Range14dPositionPct float64 `json:"range_14d_position_pct"`
-	Range14dToATR4h     float64 `json:"range_14d_to_atr_4h"`
-	// 30-дневные уровни
-	Range30dHigh        float64 `json:"range_30d_high"`
-	Range30dLow         float64 `json:"range_30d_low"`
-	Range30dWidthPct    float64 `json:"range_30d_width_pct"`
-	Range30dPositionPct float64 `json:"range_30d_position_pct"`
+
+// SideAssessment — не рейтинг. Здесь только независимые признаки и блокирующие/предупреждающие условия.
+type SideAssessment struct {
+	State             string   `json:"state"`
+	PrimaryEvidence   []string `json:"primary_evidence"`
+	SecondaryEvidence []string `json:"secondary_evidence"`
+	RiskFactors       []string `json:"risk_factors"`
+	HardBlocks        []string `json:"hard_blocks"`
+	EntryContext      string   `json:"entry_context"`
 }
+type GridAnalysis struct {
+	Regime             string         `json:"regime"`
+	RangeState         string         `json:"range_state"`
+	MeanReversionState string         `json:"mean_reversion_state"`
+	BreakoutRisk       string         `json:"breakout_risk"`
+	Long               SideAssessment `json:"long"`
+	Short              SideAssessment `json:"short"`
+	Evidence           []string       `json:"evidence"`
+	RiskFactors        []string       `json:"risk_factors"`
+}
+type DirectionalAnalysis struct {
+	Long                SideAssessment `json:"long"`
+	Short               SideAssessment `json:"short"`
+	BullishEvidence     []string       `json:"bullish_evidence"`
+	BearishEvidence     []string       `json:"bearish_evidence"`
+	ConflictingEvidence []string       `json:"conflicting_evidence"`
+	InvalidationContext []string       `json:"invalidation_context"`
+	TargetContext       []string       `json:"target_context"`
+}
+
 type Derivatives struct {
-	FundingRate           float64 `json:"funding_rate"`
-	FundingAvg            float64 `json:"funding_avg"`
-	FundingAvg24h         float64 `json:"funding_avg_24h"`
-	OpenInterest          float64 `json:"open_interest"`
-	OpenInterestChangePct float64 `json:"open_interest_change_pct"`
-	LongRatio             float64 `json:"long_ratio"`
-	ShortRatio            float64 `json:"short_ratio"`
+	FundingHistory              []bybit.Funding      `json:"funding_history"`
+	FundingCurrent              float64              `json:"funding_current"`
+	FundingAvg24h               float64              `json:"funding_avg_24h"`
+	FundingAvg7d                float64              `json:"funding_avg_7d"`
+	FundingPercentile           float64              `json:"funding_percentile"`
+	OI5m                        []bybit.OpenInterest `json:"open_interest_5m"`
+	OIChange15mPct              float64              `json:"oi_change_15m_pct"`
+	OIChange1hPct               float64              `json:"oi_change_1h_pct"`
+	OIChange4hPct               float64              `json:"oi_change_4h_pct"`
+	OIChange24hPct              float64              `json:"oi_change_24h_pct"`
+	PriceOIState1h              string               `json:"price_oi_state_1h"`
+	PriceOIState4h              string               `json:"price_oi_state_4h"`
+	LongShort5m                 []bybit.LongShort    `json:"long_short_5m"`
+	LongRatioNow                float64              `json:"long_ratio_now"`
+	LongRatioChange1hPctPoints  float64              `json:"long_ratio_change_1h_pct_points"`
+	LongRatioChange4hPctPoints  float64              `json:"long_ratio_change_4h_pct_points"`
+	LongRatioChange24hPctPoints float64              `json:"long_ratio_change_24h_pct_points"`
 }
-type OrderBook struct {
-	BidNotional  float64 `json:"bid_notional"`
-	AskNotional  float64 `json:"ask_notional"`
-	ImbalancePct float64 `json:"imbalance_pct"`
-	BidAskRatio  float64 `json:"bid_ask_ratio"`
-	SpreadPct    float64 `json:"spread_pct"`
-	Levels       int     `json:"levels"`
+type FlowWindow struct {
+	Window                  string  `json:"window"`
+	Available               bool    `json:"available"`
+	Status                  string  `json:"status"`
+	RequiredCoverageSeconds float64 `json:"required_coverage_seconds"`
+	ActualCoverageSeconds   float64 `json:"actual_coverage_seconds"`
+	Trades                  int     `json:"trades"`
+	BuyNotional             float64 `json:"buy_notional"`
+	SellNotional            float64 `json:"sell_notional"`
+	DeltaPct                float64 `json:"delta_pct"`
+}
+type Microstructure struct {
+	OrderBook             bybit.OrderBook `json:"order_book"`
+	RecentTradesCount     int             `json:"recent_trades_count"`
+	TradesFirstTime       time.Time       `json:"trades_first_time"`
+	TradesLastTime        time.Time       `json:"trades_last_time"`
+	TradesCoverageSeconds float64         `json:"trades_coverage_seconds"`
+	TakerBuyNotional      float64         `json:"taker_buy_notional"`
+	TakerSellNotional     float64         `json:"taker_sell_notional"`
+	TakerDeltaPct         float64         `json:"taker_delta_pct"`
+	TakerFlowWindows      []FlowWindow    `json:"taker_flow_windows"`
+	MarkPrice             float64         `json:"mark_price"`
+	IndexPrice            float64         `json:"index_price"`
+	MarkVsIndexPct        float64         `json:"mark_vs_index_pct"`
+	LastVsMarkPct         float64         `json:"last_vs_mark_pct"`
 }
 type BTCContext struct {
-	Price              float64 `json:"price"`
-	Change1hPct        float64 `json:"change_1h_pct"`
-	Change4hPct        float64 `json:"change_4h_pct"`
-	Change24hPct       float64 `json:"change_24h_pct"`
-	Corr1m0            float64 `json:"corr_1m_0"`
-	Corr1m1            float64 `json:"corr_1m_1"`
-	Corr1m2            float64 `json:"corr_1m_2"`
-	Corr1m3            float64 `json:"corr_1m_3"`
-	Corr1m5            float64 `json:"corr_1m_5"`
-	Corr1m10           float64 `json:"corr_1m_10"`
-	BestLagMinutes     int     `json:"best_lag_minutes"`
-	BestLagCorrelation float64 `json:"best_lag_correlation"`
-	Relative1hPct      float64 `json:"relative_1h_pct"`
-	Relative4hPct      float64 `json:"relative_4h_pct"`
-	Interpretation     string  `json:"interpretation"`
-	SelfReference      bool    `json:"self_reference"`
+	Price                  float64 `json:"price"`
+	Change1hPct            float64 `json:"change_1h_pct"`
+	Change4hPct            float64 `json:"change_4h_pct"`
+	Change24hPct           float64 `json:"change_24h_pct"`
+	Correlation1h30d       float64 `json:"correlation_1h_30d"`
+	RelativeStrength24hPct float64 `json:"relative_strength_24h_pct"`
 }
-type Strategy struct {
-	Score  int    `json:"score"`
-	Status string `json:"status"`
-	Reason string `json:"reason"`
-}
-type Strategies struct {
-	Long        Strategy `json:"long"`
-	LongGrid    Strategy `json:"long-grid"`
-	NeutralGrid Strategy `json:"neutral-grid"`
-	Short       Strategy `json:"short"`
-	ShortGrid   Strategy `json:"short-grid"`
+type RawEvidence struct {
+	Candles5m         []bybit.Candle      `json:"candles_5m"`
+	Candles15m        []bybit.Candle      `json:"candles_15m"`
+	Candles1h         []bybit.Candle      `json:"candles_1h"`
+	Candles4h         []bybit.Candle      `json:"candles_4h"`
+	Candles1d         []bybit.Candle      `json:"candles_1d"`
+	RecentTrades      []bybit.Trade       `json:"recent_trades"`
+	MarkPriceHistory  []bybit.PriceCandle `json:"mark_price_history"`
+	IndexPriceHistory []bybit.PriceCandle `json:"index_price_history"`
 }
 type AIInstructions struct {
-	Task            string   `json:"task"`
-	Rules           []string `json:"rules"`
-	RequestedOutput []string `json:"requested_output"`
+	Task                   string   `json:"task"`
+	AnalysisOrder          []string `json:"analysis_order"`
+	ImportantCautions      []string `json:"important_cautions"`
+	ExpectedDecisionFields []string `json:"expected_decision_fields"`
 }

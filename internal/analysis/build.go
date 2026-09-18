@@ -1,831 +1,683 @@
+// Package analysis превращает сырые данные Bybit в универсальный evidence-first отчёт для GRID и directional анализа.
 package analysis
 
 import (
 	"context"
-	"fmt"
-	"math"
-	"sort"
-	"time"
-
 	"crypto-coin-analyzer/internal/bybit"
 	"crypto-coin-analyzer/internal/indicators"
+	"fmt"
+	"math"
+	"time"
 )
 
 type MarketAPI interface {
 	Ticker(context.Context, string) (bybit.Ticker, error)
-	Klines(context.Context, string, string, int) ([]bybit.Candle, error)
+	KlinesRange(context.Context, string, string, int) ([]bybit.Candle, error)
+	MarkKlinesRange(context.Context, string, string, int) ([]bybit.PriceCandle, error)
+	IndexKlinesRange(context.Context, string, string, int) ([]bybit.PriceCandle, error)
 	Funding(context.Context, string, int) ([]bybit.Funding, error)
 	OpenInterest(context.Context, string, string, int) ([]bybit.OpenInterest, error)
 	LongShort(context.Context, string, string, int) ([]bybit.LongShort, error)
 	OrderBook(context.Context, string, int) (bybit.OrderBook, error)
+	RecentTrades(context.Context, string, int) ([]bybit.Trade, error)
 }
 
 func closes(c []bybit.Candle) []float64 {
-	x := make([]float64, len(c))
-	for i, v := range c {
-		x[i] = v.Close
-	}
-	return x
-}
-
-func vols(c []bybit.Candle) []float64 {
-	x := make([]float64, len(c))
-	for i, v := range c {
-		x[i] = v.Volume
-	}
-	return x
-}
-
-func change(c []bybit.Candle, n int) float64 {
-	v := closes(c)
-	if len(v) <= n {
-		return 0
-	}
-	return indicators.PercentChange(v, n)
-}
-
-func changeByValues(v []float64) float64 {
-	if len(v) < 2 || v[0] == 0 {
-		return 0
-	}
-	return (v[len(v)-1]/v[0] - 1.0) * 100.0
-}
-
-func pct(a, b float64) float64 {
-	if b == 0 {
-		return 0
-	}
-	return (a/b - 1.0) * 100.0
-}
-
-func ratioPct(a, b float64) float64 {
-	if b == 0 {
-		return 0
-	}
-	return (a / b) * 100.0
-}
-
-func takeLastCandles(c []bybit.Candle, n int) []bybit.Candle {
-	if len(c) <= n {
-		return c
-	}
-	return c[len(c)-n:]
-}
-
-func sumVolumes(c []bybit.Candle, n int) float64 {
-	if len(c) < n {
-		n = len(c)
-	}
-	var s float64
-	for _, v := range c[len(c)-n:] {
-		s += v.Volume
-	}
-	return s
-}
-
-func Build(ctx context.Context, api MarketAPI, symbol string, days int) (Report, error) {
-	if days < 1 {
-		days = 1
-	}
-	if days > 30 {
-		days = 30
-	}
-
-	ticker, err := api.Ticker(ctx, symbol)
-	if err != nil {
-		return Report{}, err
-	}
-	if ticker.LastPrice <= 0 {
-		return Report{}, fmt.Errorf("получена некорректная цена %s", symbol)
-	}
-
-	c15, err := api.Klines(ctx, symbol, "15", 200)
-	if err != nil {
-		return Report{}, err
-	}
-	c1h, err := api.Klines(ctx, symbol, "60", 200)
-	if err != nil {
-		return Report{}, err
-	}
-	c4h, err := api.Klines(ctx, symbol, "240", 200)
-	if err != nil {
-		return Report{}, err
-	}
-
-	requested1m := min(1000, days*24*60)
-	c1m, err := api.Klines(ctx, symbol, "1", requested1m)
-	if err != nil {
-		return Report{}, err
-	}
-
-	btcTicker, err := api.Ticker(ctx, "BTCUSDT")
-	if err != nil {
-		return Report{}, err
-	}
-	btc1m, err := api.Klines(ctx, "BTCUSDT", "1", requested1m)
-	if err != nil {
-		return Report{}, err
-	}
-
-	funding, _ := api.Funding(ctx, symbol, 10)
-	oi, _ := api.OpenInterest(ctx, symbol, "1h", 50)
-	ls, _ := api.LongShort(ctx, symbol, "1h", 1)
-	ob, _ := api.OrderBook(ctx, symbol, 200)
-
-	p15, p1, p4 := closes(c15), closes(c1h), closes(c4h)
-	e15 := indicators.EMA(p15, 20)
-	e15_50 := indicators.EMA(p15, 50)
-	e15_200 := indicators.EMA(p15, 200)
-	e1 := indicators.EMA(p1, 20)
-	e1_50 := indicators.EMA(p1, 50)
-	e1_200 := indicators.EMA(p1, 200)
-	e4 := indicators.EMA(p4, 20)
-	e4_50 := indicators.EMA(p4, 50)
-	e4_200 := indicators.EMA(p4, 200)
-
-	atr15 := indicators.ATR(toIndicator(c15), 14)
-	atr1 := indicators.ATR(toIndicator(c1h), 14)
-	atr4 := indicators.ATR(toIndicator(c4h), 14)
-
-	c4h14d := takeLastCandles(c4h, 84)
-	p4_14d := closes(c4h14d)
-	e4_14d_20 := indicators.EMA(p4_14d, 20)
-	e4_14d_50 := indicators.EMA(p4_14d, 50)
-	e4_14d_200 := indicators.EMA(p4_14d, 200)
-	atr4_14d := indicators.ATR(toIndicator(c4h14d), min(14, len(c4h14d)-1))
-	rsi4_14d := indicators.RSI(p4_14d, min(14, len(p4_14d)-1))
-
-	vol14d := sumVolumes(c4h, 84)
-	vol7d := sumVolumes(c4h, 42)
-	volRatio14d := 0.0
-	if vol7d > 0 {
-		volRatio14d = vol14d / vol7d
-	}
-
-	c4h30d := takeLastCandles(c4h, 180)
-	p4_30d := closes(c4h30d)
-	e4_30d_20 := indicators.EMA(p4_30d, 20)
-	e4_30d_50 := indicators.EMA(p4_30d, 50)
-	e4_30d_200 := indicators.EMA(p4_30d, 200)
-	atr4_30d := indicators.ATR(toIndicator(c4h30d), min(14, len(c4h30d)-1))
-	rsi4_30d := indicators.RSI(p4_30d, min(14, len(p4_30d)-1))
-
-	m := Market{
-		Price:        ticker.LastPrice,
-		Change24hPct: ticker.Price24hPct,
-		Change3dPct:  change(c1h, 72),
-		Change7dPct:  change(c4h, 42),
-		Turnover24h:  ticker.Turnover24h,
-		Volume24h:    ticker.Volume24h,
-		SpreadPct:    pct(ticker.AskPrice, ticker.BidPrice),
-	}
-
-	ind := Indicators{
-		RSI15m:         indicators.RSI(p15, 14),
-		RSI1h:          indicators.RSI(p1, 14),
-		RSI4h:          indicators.RSI(p4, 14),
-		RSI4h14d:       rsi4_14d,
-		RSI4h30d:       rsi4_30d,
-		ATR15m:         atr15,
-		ATR1h:          atr1,
-		ATR4h:          atr4,
-		ATR4h14d:       atr4_14d,
-		ATR4h30d:       atr4_30d,
-		ATR1hPct:       ratioPct(atr1, ticker.LastPrice),
-		ATR4hPct:       ratioPct(atr4, ticker.LastPrice),
-		ATR4h14dPct:    ratioPct(atr4_14d, ticker.LastPrice),
-		ATR4h30dPct:    ratioPct(atr4_30d, ticker.LastPrice),
-		VolumeRatio1h:  indicators.VolumeRatio(vols(c1h), 6, 24),
-		VolumeRatio14d: volRatio14d,
-	}
-
-	trend := Trend{
-		EMA20_15m:              last(e15),
-		EMA50_15m:              last(e15_50),
-		EMA200_15m:             last(e15_200),
-		EMA20_1h:               last(e1),
-		EMA50_1h:               last(e1_50),
-		EMA200_1h:              last(e1_200),
-		EMA20_4h:               last(e4),
-		EMA50_4h:               last(e4_50),
-		EMA200_4h:              last(e4_200),
-		EMA20_4h_14d:           last(e4_14d_20),
-		EMA50_4h_14d:           last(e4_14d_50),
-		EMA200_4h_14d:          last(e4_14d_200),
-		EMA20_4h_30d:           last(e4_30d_20),
-		EMA50_4h_30d:           last(e4_30d_50),
-		EMA200_4h_30d:          last(e4_30d_200),
-		PriceVsEMA20_1hPct:     pct(ticker.LastPrice, last(e1)),
-		PriceVsEMA50_1hPct:     pct(ticker.LastPrice, last(e1_50)),
-		PriceVsEMA200_1hPct:    pct(ticker.LastPrice, last(e1_200)),
-		PriceVsEMA20_4h_14dPct: pct(ticker.LastPrice, last(e4_14d_20)),
-		PriceVsEMA50_4h_14dPct: pct(ticker.LastPrice, last(e4_14d_50)),
-	}
-
-	mom := Momentum{
-		Change1hPct:  change(c1h, 1),
-		Change4hPct:  change(c1h, 4),
-		Change12hPct: change(c1h, 12),
-		Change24hPct: change(c1h, 24),
-		Change7dPct:  change(c4h, 42),
-		Change14dPct: changeByValues(p4_14d),
-		Change30dPct: changeByValues(p4_30d),
-		ROC1hPct:     change(c1h, 1),
-		ROC4hPct:     change(c1h, 4),
-		ROC14dPct:    changeByValues(p4_14d),
-	}
-
-	vol := Volume{
-		Volume5m:  sumRecent(c1m, 5),
-		Volume15m: sumRecent(c1m, 15),
-		Volume1h:  sumRecent(c1m, 60),
-		Ratio5m:   volumeRatioRecent(c1m, 5, 60),
-		Ratio15m:  volumeRatioRecent(c1m, 15, 60),
-		Ratio1h:   volumeRatioRecent(c1m, 60, 240),
-	}
-
-	structure := buildStructure(c1h)
-	levels := buildLevels(c1h, c4h, atr1, atr4, ticker.LastPrice)
-
-	der := Derivatives{
-		FundingRate:  ticker.FundingRate,
-		OpenInterest: ticker.OpenInterest,
-	}
-	if len(funding) > 0 {
-		der.FundingAvg = avgFunding(funding)
-		der.FundingAvg24h = avgFundingSince(funding, time.Now().UTC().Add(-24*time.Hour))
-	}
-	if len(oi) > 1 {
-		sort.Slice(oi, func(i, j int) bool { return oi[i].Time.Before(oi[j].Time) })
-		oldest, newest := oi[0].Value, oi[len(oi)-1].Value
-		if oldest != 0 {
-			der.OpenInterestChangePct = (newest/oldest - 1.0) * 100.0
-		}
-	}
-	if len(ls) > 0 {
-		der.LongRatio = ls[0].BuyRatio
-		der.ShortRatio = ls[0].SellRatio
-	}
-
-	order := OrderBook{
-		BidNotional:  ob.BidNotional,
-		AskNotional:  ob.AskNotional,
-		ImbalancePct: ob.ImbalancePct,
-		BidAskRatio:  ob.Ratio,
-		SpreadPct:    m.SpreadPct,
-		Levels:       ob.Levels,
-	}
-
-	btc := buildBTCContext(c1m, btc1m, btcTicker, c1h, symbol == "BTCUSDT")
-	strategies := scoreStrategies(m, ind, trend, mom, structure, levels, der, order, btc)
-
-	notes := []string{}
-	if len(c1m) < requested1m {
-		notes = append(notes, fmt.Sprintf("Доступно %d из %d запрошенных 1m свечей.", len(c1m), requested1m))
-	}
-	if days > 1 {
-		notes = append(notes, "Запрос 1m ограничен 1000 свечами (около 16.6 часов) из-за лимита одиночного вызова Bybit V5.")
-	}
-
-	return Report{
-		GeneratedAt: time.Now().UTC(),
-		Exchange:    "Bybit",
-		Category:    "linear",
-		Symbol:      symbol,
-		Purpose:     "Глубокий снимок одной монеты для последующего AI-анализа Long/Short и оценки контекста BTC.",
-		DataQuality: DataQuality{OneMinuteCandles: len(c1m), Notes: notes},
-		Market:      m,
-		Indicators:  ind,
-		Trend:       trend,
-		Momentum:    mom,
-		Volume:      vol,
-		Structure:   structure,
-		Levels:      levels,
-		Derivatives: der,
-		OrderBook:   order,
-		BTCContext:  btc,
-		Strategies:  strategies,
-	}, nil
-}
-
-func alignReturns(a, b []bybit.Candle) ([]float64, []float64) {
-	if len(a) < 2 || len(b) < 2 {
-		return nil, nil
-	}
-	bReturns := make(map[time.Time]float64, len(b)-1)
-	for i := 1; i < len(b); i++ {
-		if b[i-1].Close != 0 {
-			bReturns[b[i].Time] = b[i].Close/b[i-1].Close - 1.0
-		}
-	}
-	aReturns := make([]float64, 0, len(a)-1)
-	bAligned := make([]float64, 0, len(a)-1)
-	for i := 1; i < len(a); i++ {
-		if a[i-1].Close == 0 {
-			continue
-		}
-		br, ok := bReturns[a[i].Time]
-		if !ok {
-			continue
-		}
-		aReturns = append(aReturns, a[i].Close/a[i-1].Close-1.0)
-		bAligned = append(bAligned, br)
-	}
-	if len(aReturns) < 4 {
-		return nil, nil
-	}
-	return aReturns, bAligned
-}
-
-func lagCorrAligned(aReturns, bAligned []float64, lag int) float64 {
-	if len(aReturns) < 6 || lag >= len(aReturns) {
-		return 0
-	}
-	return indicators.Correlation(aReturns[lag:], bAligned[:len(bAligned)-lag])
-}
-
-func buildBTCContext(c, btc []bybit.Candle, t bybit.Ticker, target1h []bybit.Candle, selfReference bool) BTCContext {
-	ctx := BTCContext{Price: t.LastPrice, Change24hPct: t.Price24hPct, SelfReference: selfReference}
-	btcHourly := btcTo1h(btc)
-	ctx.Change1hPct = change(btcHourly, 1)
-	ctx.Change4hPct = change(btcHourly, 4)
-
-	if selfReference {
-		ctx.Interpretation = "BTCUSDT выбран как анализируемый инструмент: BTC-контекст самоссылочен."
-		return ctx
-	}
-
-	aRet, bAligned := alignReturns(c, btc)
-	lags := []int{0, 1, 2, 3, 5, 10}
-	vals := make([]float64, len(lags))
-	for i, l := range lags {
-		vals[i] = lagCorrAligned(aRet, bAligned, l)
-	}
-
-	ctx.Corr1m0 = vals[0]
-	ctx.Corr1m1 = vals[1]
-	ctx.Corr1m2 = vals[2]
-	ctx.Corr1m3 = vals[3]
-	ctx.Corr1m5 = vals[4]
-	ctx.Corr1m10 = vals[5]
-
-	best := 0
-	bestv := vals[0]
-	for i := 1; i < len(vals); i++ {
-		if vals[i] > bestv {
-			bestv = vals[i]
-			best = lags[i]
-		}
-	}
-	ctx.BestLagMinutes = best
-	ctx.BestLagCorrelation = bestv
-
-	if len(target1h) > 4 {
-		ctx.Relative1hPct = change(target1h, 1) - change(btcHourly, 1)
-		ctx.Relative4hPct = change(target1h, 4) - change(btcHourly, 4)
-	}
-	ctx.Interpretation = fmt.Sprintf("Максимальная корреляция доходностей BTC→монета среди проверенных лагов: %d мин, corr=%.3f.", best, bestv)
-	return ctx
-}
-
-func toIndicator(c []bybit.Candle) []indicators.Candle {
-	o := make([]indicators.Candle, len(c))
-	for i, v := range c {
-		o[i] = indicators.Candle{Open: v.Open, High: v.High, Low: v.Low, Close: v.Close, Volume: v.Volume}
+	o := make([]float64, len(c))
+	for i, x := range c {
+		o[i] = x.Close
 	}
 	return o
 }
-
+func vols(c []bybit.Candle) []float64 {
+	o := make([]float64, len(c))
+	for i, x := range c {
+		o[i] = x.Volume
+	}
+	return o
+}
+func ic(c []bybit.Candle) []indicators.Candle {
+	o := make([]indicators.Candle, len(c))
+	for i, x := range c {
+		o[i] = indicators.Candle{Open: x.Open, High: x.High, Low: x.Low, Close: x.Close, Volume: x.Volume}
+	}
+	return o
+}
 func last(v []float64) float64 {
 	if len(v) == 0 {
 		return 0
 	}
 	return v[len(v)-1]
 }
-
+func pct(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return (a/b - 1) * 100
+}
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
-
-func sumRecent(c []bybit.Candle, n int) float64 {
-	if len(c) == 0 {
-		return 0
-	}
-	if n > len(c) {
-		n = len(c)
-	}
-	var s float64
-	for _, v := range c[len(c)-n:] {
-		s += v.Volume
-	}
-	return s
-}
-
-func volumeRatioRecent(c []bybit.Candle, n, long int) float64 {
-	if len(c) < long || long == 0 {
-		return 0
-	}
-	return indicators.Mean(volumes(c[len(c)-n:])) / indicators.Mean(volumes(c[len(c)-long:]))
-}
-
-func volumes(c []bybit.Candle) []float64 { return vols(c) }
-
-func avgFundingSince(f []bybit.Funding, since time.Time) float64 {
-	filtered := make([]bybit.Funding, 0, len(f))
-	for _, x := range f {
-		if !x.Time.Before(since) {
-			filtered = append(filtered, x)
-		}
-	}
-	if len(filtered) == 0 {
-		return avgFunding(f)
-	}
-	return avgFunding(filtered)
-}
-
-func avgFunding(f []bybit.Funding) float64 {
-	if len(f) == 0 {
-		return 0
-	}
-	var s float64
-	for _, x := range f {
-		s += x.Rate
-	}
-	return s / float64(len(f))
-}
-
-func buildStructure(c []bybit.Candle) Structure {
-	var highs, lows []Pivot
-	if len(c) >= 5 {
-		for i := 2; i < len(c)-2; i++ {
-			if c[i].High > c[i-1].High && c[i].High > c[i-2].High && c[i].High > c[i+1].High && c[i].High > c[i+2].High {
-				highs = append(highs, Pivot{Time: c[i].Time, Price: c[i].High})
-			}
-			if c[i].Low < c[i-1].Low && c[i].Low < c[i-2].Low && c[i].Low < c[i+1].Low && c[i].Low < c[i+2].Low {
-				lows = append(lows, Pivot{Time: c[i].Time, Price: c[i].Low})
-			}
-		}
-	}
-	if len(highs) > 6 {
-		highs = highs[len(highs)-6:]
-	}
-	if len(lows) > 6 {
-		lows = lows[len(lows)-6:]
-	}
-	s := Structure{PivotHighs: highs, PivotLows: lows}
-	if len(highs) >= 2 {
-		s.PreviousHigh = highs[len(highs)-2].Price
-		s.CurrentHigh = highs[len(highs)-1].Price
-		if s.CurrentHigh > s.PreviousHigh {
-			s.HighState = "HH"
-		} else {
-			s.HighState = "LH"
-		}
-	}
-	if len(lows) >= 2 {
-		s.PreviousLow = lows[len(lows)-2].Price
-		s.CurrentLow = lows[len(lows)-1].Price
-		if s.CurrentLow > s.PreviousLow {
-			s.LowState = "HL"
-		} else {
-			s.LowState = "LL"
-		}
-	}
-	return s
-}
-
-func buildLevels(c1h, c4h []bybit.Candle, atr1h, atr4h, price float64) Levels {
-	if len(c1h) == 0 {
-		return Levels{}
-	}
-
-	window := 120
-	if len(c1h) < window {
-		window = len(c1h)
-	}
-	cs := c1h[len(c1h)-window:]
-	hi, lo := cs[0].High, cs[0].Low
-	for _, v := range cs {
-		if v.High > hi {
-			hi = v.High
-		}
-		if v.Low < lo {
-			lo = v.Low
-		}
-	}
-	res := []float64{}
-	sup := []float64{}
-	for i := 2; i < len(cs)-2; i++ {
-		if cs[i].High > cs[i-1].High && cs[i].High > cs[i-2].High && cs[i].High > cs[i+1].High && cs[i].High > cs[i+2].High {
-			if cs[i].High > price {
-				res = append(res, cs[i].High)
-			}
-		}
-		if cs[i].Low < cs[i-1].Low && cs[i].Low < cs[i-2].Low && cs[i].Low < cs[i+1].Low && cs[i].Low < cs[i+2].Low {
-			if cs[i].Low < price {
-				sup = append(sup, cs[i].Low)
-			}
-		}
-	}
-	sort.Float64s(res)
-	sort.Sort(sort.Reverse(sort.Float64Slice(sup)))
-
-	nr, ns := 0.0, 0.0
-	if len(res) > 0 {
-		nr = res[0]
-	}
-	if len(sup) > 0 {
-		ns = sup[0]
-	}
-
-	width := pct(hi, lo)
-	pos := 0.0
-	if hi > lo {
-		pos = (price - lo) / (hi - lo) * 100.0
-	}
-
-	levels14d := buildLevelsFromCandles(c4h, 84, price)
-	levels30d := buildLevelsFromCandles(c4h, 180, price)
-
-	return Levels{
-		Resistance:        tail(res, 5),
-		Support:           tail(sup, 5),
-		NearestResistance: nr,
-		NearestSupport:    ns,
-		RangeWidthPct:     width,
-		RangePositionPct:  pos,
-		RangeToATR1h: func() float64 {
-			if atr1h == 0 {
-				return 0
-			}
-			return (hi - lo) / atr1h
-		}(),
-		PriceDiscovery:      len(res) == 0 && price >= hi,
-		RecentRangeHigh:     hi,
-		RecentRangeLow:      lo,
-		Range14dHigh:        levels14d.High,
-		Range14dLow:         levels14d.Low,
-		Range14dWidthPct:    levels14d.WidthPct,
-		Range14dPositionPct: levels14d.PositionPct,
-		Range14dToATR4h:     levels14d.ToATR,
-		Range30dHigh:        levels30d.High,
-		Range30dLow:         levels30d.Low,
-		Range30dWidthPct:    levels30d.WidthPct,
-		Range30dPositionPct: levels30d.PositionPct,
-	}
-}
-
-type rangeLevels struct {
-	High, Low, WidthPct, PositionPct, ToATR float64
-}
-
-func buildLevelsFromCandles(c []bybit.Candle, window int, price float64) rangeLevels {
-	if len(c) < 2 {
-		return rangeLevels{}
-	}
-	if window > len(c) {
-		window = len(c)
-	}
-	cs := c[len(c)-window:]
-	hi, lo := cs[0].High, cs[0].Low
-	for _, v := range cs {
-		if v.High > hi {
-			hi = v.High
-		}
-		if v.Low < lo {
-			lo = v.Low
-		}
-	}
-	width := 0.0
-	if lo > 0 {
-		width = (hi/lo - 1.0) * 100.0
-	}
-	pos := 0.0
-	if hi > lo {
-		pos = (price - lo) / (hi - lo) * 100.0
-	}
-	atr := indicators.ATR(toIndicator(cs), 14)
-	toATR := 0.0
-	if atr > 0 {
-		toATR = (hi - lo) / atr
-	}
-	return rangeLevels{High: hi, Low: lo, WidthPct: width, PositionPct: pos, ToATR: toATR}
-}
-
+func mean(v []float64) float64 { return indicators.Mean(v) }
 func tail(v []float64, n int) []float64 {
 	if len(v) <= n {
 		return v
 	}
 	return v[len(v)-n:]
 }
-
-func btcTo1h(c []bybit.Candle) []bybit.Candle {
-	if len(c) < 60 {
-		return c
+func tf(c []bybit.Candle, price float64, window int) Timeframe {
+	p := closes(c)
+	e20, e50, e200 := indicators.EMA(p, 20), indicators.EMA(p, 50), indicators.EMA(p, 200)
+	atr := indicators.ATR(ic(c), 14)
+	hi, lo := 0.0, math.MaxFloat64
+	if window > len(c) {
+		window = len(c)
 	}
-	out := make([]bybit.Candle, 0, len(c)/60)
-	for i := 0; i+59 < len(c); i += 60 {
-		g := c[i : i+60]
-		x := g[0]
-		x.Close = g[len(g)-1].Close
-		x.High = g[0].High
-		x.Low = g[0].Low
-		for _, v := range g {
-			if v.High > x.High {
-				x.High = v.High
+	for _, x := range c[len(c)-window:] {
+		if x.High > hi {
+			hi = x.High
+		}
+		if x.Low < lo {
+			lo = x.Low
+		}
+	}
+	pos := 0.0
+	if hi > lo {
+		pos = (price - lo) / (hi - lo) * 100
+	}
+	vr := 0.0
+	v := vols(c)
+	if len(v) >= 48 {
+		vr = mean(tail(v, 6)) / mean(tail(v, 48))
+	}
+	return Timeframe{len(c), indicators.PercentChange(p, min(window-1, len(p)-1)), indicators.RSI(p, 14), atr, func() float64 {
+		if price == 0 {
+			return 0
+		}
+		return atr / price * 100
+	}(), indicators.ADX(ic(c), 14), last(e20), last(e50), last(e200), indicators.EfficiencyRatio(p, min(window-1, 48)), indicators.RealizedVolPct(p, min(window-1, 48)), indicators.BollingerWidthPct(p, min(window, 48)), vr, hi, lo, pos}
+}
+
+// analyzeRange исследует последние 48 часов и отдельно измеряет дрейф rolling-range.
+// Это защищает от ошибки, когда растущий/падающий канал ошибочно считается стационарным боковиком.
+func analyzeRange(c []bybit.Candle) RangeAnalysis {
+	n := min(len(c), 192)
+	if n < 48 {
+		return RangeAnalysis{}
+	}
+	x := c[len(c)-n:]
+	hi, lo := 0.0, math.MaxFloat64
+	for _, q := range x {
+		if q.High > hi {
+			hi = q.High
+		}
+		if q.Low < lo {
+			lo = q.Low
+		}
+	}
+	mid := (hi + lo) / 2
+	width := hi - lo
+	tol := width * .08
+	ut, lt, mc := 0, 0, 0
+	for i, q := range x {
+		if q.High >= hi-tol {
+			ut++
+		}
+		if q.Low <= lo+tol {
+			lt++
+		}
+		if i > 0 && (x[i-1].Close-mid)*(q.Close-mid) < 0 {
+			mc++
+		}
+	}
+	pos := 0.0
+	if width > 0 {
+		pos = (x[len(x)-1].Close - lo) / width * 100
+	}
+	// Сравниваем границы первой и второй половины окна: это лучше отражает moving range, чем один global midpoint.
+	bounds := func(z []bybit.Candle) (float64, float64) {
+		h, l := 0.0, math.MaxFloat64
+		for _, q := range z {
+			if q.High > h {
+				h = q.High
 			}
-			if v.Low < x.Low {
-				x.Low = v.Low
+			if q.Low < l {
+				l = q.Low
 			}
 		}
-		out = append(out, x)
+		return h, l
+	}
+	h1, l1 := bounds(x[:n/2])
+	h2, l2 := bounds(x[n/2:])
+	m1, m2 := (h1+l1)/2, (h2+l2)/2
+	w1, w2 := h1-l1, h2-l2
+	drift := pct(m2, m1)
+	wchg := 0.0
+	if w1 > 0 {
+		wchg = (w2/w1 - 1) * 100
+	}
+	slope := drift / (float64(n) * .25 / 2)
+	station := "stationary"
+	risks := []string{}
+	ev := []string{}
+	if math.Abs(drift) > 1.0 {
+		station = "drifting"
+		risks = append(risks, fmt.Sprintf("rolling midpoint сместился на %.2f%%", drift))
+	} else {
+		ev = append(ev, "rolling midpoint относительно стабилен")
+	}
+	if math.Abs(wchg) > 35 {
+		risks = append(risks, fmt.Sprintf("ширина rolling range изменилась на %.1f%%", wchg))
+	}
+	bal := "balanced"
+	if ut > lt*2 {
+		bal = "upper-heavy"
+	}
+	if lt > ut*2 {
+		bal = "lower-heavy"
+	}
+	if mc >= 3 {
+		ev = append(ev, fmt.Sprintf("midpoint пересечён %d раз", mc))
+	} else {
+		risks = append(risks, "мало возвратов через midpoint")
+	}
+	if ut >= 3 && lt >= 3 {
+		ev = append(ev, "обе границы тестировались неоднократно")
+	} else {
+		risks = append(risks, "нет достаточного числа тестов обеих границ")
+	}
+	return RangeAnalysis{48, hi, lo, mid, pct(hi, lo), pos, ut, lt, mc, 0, 0, 0, slope, drift, wchg, station, bal, ev, risks}
+}
+
+// swings ищет подтверждённые pivot high/low. Strength задаёт число свечей с каждой стороны экстремума.
+func swings(c []bybit.Candle, strength, keep int) []SwingPoint {
+	if len(c) < strength*2+1 {
+		return nil
+	}
+	out := []SwingPoint{}
+	for i := strength; i < len(c)-strength; i++ {
+		hi, lo := true, true
+		for j := i - strength; j <= i+strength; j++ {
+			if j == i {
+				continue
+			}
+			if c[j].High >= c[i].High {
+				hi = false
+			}
+			if c[j].Low <= c[i].Low {
+				lo = false
+			}
+		}
+		if hi {
+			out = append(out, SwingPoint{Time: c[i].Time, Type: "H", Price: c[i].High, Strength: strength, Ambiguous: hi && lo})
+		}
+		if lo {
+			out = append(out, SwingPoint{Time: c[i].Time, Type: "L", Price: c[i].Low, Strength: strength, Ambiguous: hi && lo})
+		}
+	}
+	if len(out) > keep {
+		out = out[len(out)-keep:]
+	}
+	return out
+}
+func structure(c []bybit.Candle, strength int) StructureAnalysis {
+	sw := swings(c, strength, 12)
+	hs, ls := []SwingPoint{}, []SwingPoint{}
+	ambiguousBars := 0
+	seenAmbiguous := map[time.Time]bool{}
+	for _, x := range sw {
+		if x.Ambiguous {
+			if !seenAmbiguous[x.Time] {
+				ambiguousBars++
+				seenAmbiguous[x.Time] = true
+			}
+			continue
+		}
+		if x.Type == "H" {
+			hs = append(hs, x)
+		} else {
+			ls = append(ls, x)
+		}
+	}
+	hseq, lseq := "unknown", "unknown"
+	ev := []string{}
+	if len(hs) >= 2 {
+		if hs[len(hs)-1].Price > hs[len(hs)-2].Price {
+			hseq = "HH"
+		} else {
+			hseq = "LH"
+		}
+		ev = append(ev, fmt.Sprintf("последние swing highs %.8g -> %.8g", hs[len(hs)-2].Price, hs[len(hs)-1].Price))
+	}
+	if len(ls) >= 2 {
+		if ls[len(ls)-1].Price > ls[len(ls)-2].Price {
+			lseq = "HL"
+		} else {
+			lseq = "LL"
+		}
+		ev = append(ev, fmt.Sprintf("последние swing lows %.8g -> %.8g", ls[len(ls)-2].Price, ls[len(ls)-1].Price))
+	}
+	label := hseq + "+" + lseq
+	conflicts := []string{}
+	if ambiguousBars > 0 {
+		conflicts = append(conflicts, fmt.Sprintf("%d outside-bar swing(s) сохранены, но исключены из HH/HL/LH/LL", ambiguousBars))
+	}
+	return StructureAnalysis{label, hseq, lseq, sw, ev, conflicts}
+}
+
+// classifyRegime использует иерархию условий, а не сумму баллов. Сильные блокирующие признаки имеют приоритет.
+func classifyRegime(t15, t1, t4 Timeframe, r RangeAnalysis) (MarketRegime, GridAnalysis) {
+	ev := append([]string{}, r.Evidence...)
+	risks := append([]string{}, r.Risks...)
+	trend := "weak"
+	if t1.ADX14 >= 25 {
+		trend = "medium"
+	}
+	if t1.ADX14 >= 35 {
+		trend = "strong"
+	}
+	vol := "normal"
+	if t15.VolumeRatio > 1.5 || t1.ATRPct > t4.ATRPct {
+		vol = "expansion"
+	}
+	if t15.VolumeRatio < .7 {
+		vol = "compression"
+	}
+	br := "low"
+	if t15.VolumeRatio > 1.5 || r.PositionPct < 8 || r.PositionPct > 92 {
+		br = "medium"
+	}
+	if t15.VolumeRatio > 2.5 || t1.EfficiencyRatio > .6 {
+		br = "high"
+	}
+	bias := "neutral"
+	if t1.EMA20 > t1.EMA50 && t4.EMA20 > t4.EMA50 {
+		bias = "long"
+	}
+	if t1.EMA20 < t1.EMA50 && t4.EMA20 < t4.EMA50 {
+		bias = "short"
+	}
+	class := "RANGING_STATIONARY"
+	if r.Stationarity == "drifting" {
+		if r.RollingMidDriftPct > 0 {
+			class = "RANGING_DRIFT_UP"
+		} else if r.RollingMidDriftPct < 0 {
+			class = "RANGING_DRIFT_DOWN"
+		} else {
+			class = "RANGING_DRIFT"
+		}
+	}
+	if trend == "strong" && vol == "expansion" {
+		class = "TRENDING_EXPANSION"
+	} else if br == "high" {
+		class = "BREAKOUT_RISK"
+	} else if trend != "weak" {
+		class = "TRENDING"
+	} else if vol == "compression" {
+		class = "COMPRESSION"
+	}
+	hard := []string{}
+	if r.Stationarity == "drifting" {
+		hard = append(hard, "range дрейфует")
+	}
+	if br == "high" {
+		hard = append(hard, "высокий breakout risk")
+	}
+	if trend == "strong" && t1.EfficiencyRatio > .45 {
+		hard = append(hard, "сильный эффективный тренд")
+	}
+	gridReg := "GRID_CANDIDATE"
+	if len(hard) > 0 {
+		gridReg = "NO_GRID_REGIME"
+	} else if br == "medium" || trend == "medium" || len(r.Risks) > 0 {
+		gridReg = "CAUTION"
+	}
+	side := func(dir string) SideAssessment {
+		p, s, rf, hb := []string{}, []string{}, []string{}, append([]string{}, hard...)
+		if dir == "long" {
+			if r.PositionPct < 35 {
+				p = append(p, "цена в нижней части range")
+			} else {
+				rf = append(rf, "цена не в нижней части range")
+			}
+			if bias == "long" {
+				s = append(s, "EMA 1h/4h имеют bullish bias")
+			}
+		} else {
+			if r.PositionPct > 65 {
+				p = append(p, "цена в верхней части range")
+			} else {
+				rf = append(rf, "цена не в верхней части range")
+			}
+			if bias == "short" {
+				s = append(s, "EMA 1h/4h имеют bearish bias")
+			}
+		}
+		state := "OBSERVE"
+		if len(hb) > 0 {
+			state = "BLOCKED_BY_REGIME"
+		} else if len(rf) > 0 {
+			state = "CAUTION"
+		}
+		return SideAssessment{state, p, s, rf, hb, fmt.Sprintf("range_position=%.1f%%", r.PositionPct)}
+	}
+	rangeState := "uncertain"
+	if r.Stationarity == "stationary" && r.UpperTouches >= 3 && r.LowerTouches >= 3 {
+		rangeState = "established"
+	}
+	meanState := "weak"
+	if r.MidCrosses >= 5 && r.Stationarity == "stationary" {
+		meanState = "present"
+	}
+	return MarketRegime{class, trend, vol, br, bias, ev, risks}, GridAnalysis{gridReg, rangeState, meanState, br, side("long"), side("short"), ev, risks}
+}
+
+// analyzeDirectional не складывает индикаторы. Первичные факторы (4h/1h structure, trend, OI-price) отделены от вторичных.
+func analyzeDirectional(t15, t1, t4 Timeframe, r RangeAnalysis, oi1, oi4, delta float64, s1, s4 StructureAnalysis) DirectionalAnalysis {
+	bull, bear, conf := []string{}, []string{}, []string{}
+	if s4.SwingHighSequence == "HH" && s4.SwingLowSequence == "HL" {
+		bull = append(bull, "4h structure HH+HL")
+	} else if s4.SwingHighSequence == "LH" && s4.SwingLowSequence == "LL" {
+		bear = append(bear, "4h structure LH+LL")
+	}
+	if s1.SwingHighSequence == "HH" && s1.SwingLowSequence == "HL" {
+		bull = append(bull, "1h structure HH+HL")
+	} else if s1.SwingHighSequence == "LH" && s1.SwingLowSequence == "LL" {
+		bear = append(bear, "1h structure LH+LL")
+	}
+	if t1.EMA20 > t1.EMA50 {
+		bull = append(bull, "EMA20 > EMA50 1h")
+	} else {
+		bear = append(bear, "EMA20 < EMA50 1h")
+	}
+	if delta > 5 {
+		bull = append(bull, "recent taker flow положительный")
+	} else if delta < -5 {
+		bear = append(bear, "recent taker flow отрицательный")
+	}
+	if t15.VolumeRatio > 1.8 {
+		conf = append(conf, "volume expansion: возможен импульс или поздний вход")
+	}
+	if math.Abs(oi1) > 5 {
+		conf = append(conf, "резкое изменение OI 1h")
+	}
+	mk := func(dir string) SideAssessment {
+		primary, secondary, risks := []string{}, []string{}, append([]string{}, conf...)
+		if dir == "long" {
+			for _, x := range bull {
+				if len(primary) < 3 {
+					primary = append(primary, x)
+				} else {
+					secondary = append(secondary, x)
+				}
+			}
+			if len(bear) >= 2 {
+				risks = append(risks, "существенные bearish evidence присутствуют")
+			}
+		} else {
+			for _, x := range bear {
+				if len(primary) < 3 {
+					primary = append(primary, x)
+				} else {
+					secondary = append(secondary, x)
+				}
+			}
+			if len(bull) >= 2 {
+				risks = append(risks, "существенные bullish evidence присутствуют")
+			}
+		}
+		state := "MIXED"
+		if len(primary) >= 2 && len(risks) == 0 {
+			state = "SUPPORTED"
+		}
+		return SideAssessment{state, primary, secondary, risks, nil, fmt.Sprintf("range_position=%.1f%%; OI1h=%.2f%%; OI4h=%.2f%%", r.PositionPct, oi1, oi4)}
+	}
+	return DirectionalAnalysis{mk("long"), mk("short"), bull, bear, conf, []string{fmt.Sprintf("наблюдаемый low %.8g / high %.8g", r.Low, r.High)}, []string{fmt.Sprintf("наблюдаемые уровни %.8g–%.8g", r.Low, r.High)}}
+}
+func oiChange(v []bybit.OpenInterest, n int) float64 {
+	if len(v) < 2 {
+		return 0
+	}
+	if n >= len(v) {
+		n = len(v) - 1
+	}
+	return pct(v[len(v)-1].Value, v[len(v)-1-n].Value)
+}
+func corrReturns(a, b []bybit.Candle, n int) float64 {
+	n = min(n, min(len(a), len(b)))
+	if n < 4 {
+		return 0
+	}
+	aa, bb := closes(a[len(a)-n:]), closes(b[len(b)-n:])
+	ra, rb := []float64{}, []float64{}
+	for i := 1; i < n; i++ {
+		if aa[i-1] != 0 && bb[i-1] != 0 {
+			ra = append(ra, aa[i]/aa[i-1]-1)
+			rb = append(rb, bb[i]/bb[i-1]-1)
+		}
+	}
+	return indicators.Correlation(ra, rb)
+}
+func avgFunding(v []bybit.Funding, since time.Duration) float64 {
+	cut := time.Now().UTC().Add(-since)
+	z := []float64{}
+	for _, x := range v {
+		if x.Time.After(cut) {
+			z = append(z, x.Rate)
+		}
+	}
+	return mean(z)
+}
+func percentile(v []bybit.Funding, current float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	n := 0
+	for _, x := range v {
+		if x.Rate <= current {
+			n++
+		}
+	}
+	return float64(n) / float64(len(v)) * 100
+}
+func lsChange(v []bybit.LongShort, n int) float64 {
+	if len(v) < 2 {
+		return 0
+	}
+	if n >= len(v) {
+		n = len(v) - 1
+	}
+	return (v[len(v)-1].LongRatio - v[len(v)-1-n].LongRatio) * 100
+}
+func priceOIState(price, oi float64) string {
+	p := "price_flat"
+	if price > .15 {
+		p = "price_up"
+	} else if price < -.15 {
+		p = "price_down"
+	}
+	o := "oi_flat"
+	if oi > .5 {
+		o = "oi_up"
+	} else if oi < -.5 {
+		o = "oi_down"
+	}
+	return p + "+" + o
+}
+func flow(tr []bybit.Trade, window time.Duration) FlowWindow {
+	// Bybit recent-trade для linear возвращает только последние сделки, а не гарантированное временное окно.
+	// Поэтому 5m/15m delta нельзя выдавать, если фактическая выборка покрывает лишь десятки секунд.
+	f := FlowWindow{Window: window.String(), RequiredCoverageSeconds: window.Seconds(), Status: "insufficient_data"}
+	if len(tr) == 0 {
+		return f
+	}
+	coverage := tr[len(tr)-1].Time.Sub(tr[0].Time).Seconds()
+	f.ActualCoverageSeconds = coverage
+	if coverage < window.Seconds() {
+		return f
+	}
+	cut := tr[len(tr)-1].Time.Add(-window)
+	b, sell, n := 0.0, 0.0, 0
+	for _, x := range tr {
+		if x.Time.Before(cut) {
+			continue
+		}
+		n++
+		v := x.Price * x.Size
+		if x.Side == "Buy" {
+			b += v
+		} else {
+			sell += v
+		}
+	}
+	f.Available = true
+	f.Status = "complete_window"
+	f.Trades, f.BuyNotional, f.SellNotional = n, b, sell
+	if b+sell > 0 {
+		f.DeltaPct = (b - sell) / (b + sell) * 100
+	}
+	return f
+}
+
+func regimeHistory(c []bybit.Candle) []RegimeSnapshot {
+	out := []RegimeSnapshot{}
+	for _, ago := range []int{48, 36, 24, 12, 6, 0} {
+		end := len(c) - ago*4
+		if end < 200 {
+			continue
+		}
+		z := c[:end]
+		t := tf(z, z[len(z)-1].Close, min(192, len(z)))
+		r := analyzeRange(z)
+		cl := "RANGING"
+		if t.ADX14 >= 35 && t.EfficiencyRatio > .45 {
+			cl = "TRENDING"
+		}
+		if t.VolumeRatio > 2.5 {
+			cl = "EXPANSION"
+		}
+		out = append(out, RegimeSnapshot{z[len(z)-1].Time, 48, cl, t.ADX14, t.EfficiencyRatio, t.ATRPct, t.VolumeRatio, r.SlopePctPerHour})
 	}
 	return out
 }
 
-func scoreStrategies(m Market, ind Indicators, tr Trend, mom Momentum, s Structure, l Levels, d Derivatives, o OrderBook, btc BTCContext) Strategies {
-	long, short, lg, sg, ng := 0, 0, 0, 0, 0
-
-	if tr.EMA20_1h > tr.EMA50_1h {
-		long += 15
-	} else {
-		short += 15
+// Build собирает полный raw evidence и нейтральные производные признаки по одному символу.
+func Build(ctx context.Context, api MarketAPI, symbol string, request Request) (Report, error) {
+	ticker, err := api.Ticker(ctx, symbol)
+	if err != nil {
+		return Report{}, err
 	}
-	if tr.EMA20_4h > tr.EMA50_4h {
-		long += 15
-	} else {
-		short += 15
+	if ticker.LastPrice <= 0 {
+		return Report{}, fmt.Errorf("некорректная цена %s", symbol)
 	}
-	if mom.Change4hPct > 1 {
-		long += 10
+	warnings := []string{}
+	get := func(interval string, n int) []bybit.Candle {
+		v, e := api.KlinesRange(ctx, symbol, interval, n)
+		if e != nil {
+			warnings = append(warnings, fmt.Sprintf("klines %s: %v", interval, e))
+		}
+		return v
 	}
-	if mom.Change4hPct < -1 {
-		short += 10
+	c5, c15, c1, c4, cD := get("5", 864), get("15", 1344), get("60", 1440), get("240", 1080), get("D", 365)
+	if len(c1) < 100 || len(c4) < 100 {
+		return Report{}, fmt.Errorf("недостаточно основной истории для %s", symbol)
 	}
-	if ind.RSI1h > 55 {
-		long += 10
+	funding, e := api.Funding(ctx, symbol, 90)
+	if e != nil {
+		warnings = append(warnings, "funding: "+e.Error())
 	}
-	if ind.RSI1h < 45 {
-		short += 10
+	oi, e := api.OpenInterest(ctx, symbol, "5min", 288)
+	if e != nil {
+		warnings = append(warnings, "open interest: "+e.Error())
 	}
-	if d.OpenInterestChangePct > 3 && mom.Change4hPct > 0 {
-		long += 10
+	ls, e := api.LongShort(ctx, symbol, "5min", 288)
+	if e != nil {
+		warnings = append(warnings, "long/short: "+e.Error())
 	}
-	if d.OpenInterestChangePct > 3 && mom.Change4hPct < 0 {
-		short += 10
+	ob, e := api.OrderBook(ctx, symbol, 500)
+	if e != nil {
+		warnings = append(warnings, "orderbook: "+e.Error())
 	}
-	if o.ImbalancePct > 5 {
-		long += 5
+	trades, e := api.RecentTrades(ctx, symbol, 1000)
+	if e != nil {
+		warnings = append(warnings, "recent trades: "+e.Error())
 	}
-	if o.ImbalancePct < -5 {
-		short += 5
+	mark, e := api.MarkKlinesRange(ctx, symbol, "1", 60)
+	if e != nil {
+		warnings = append(warnings, "mark price: "+e.Error())
 	}
-	if s.HighState == "HH" && s.LowState == "HL" {
-		long += 10
+	index, e := api.IndexKlinesRange(ctx, symbol, "1", 60)
+	if e != nil {
+		warnings = append(warnings, "index price: "+e.Error())
 	}
-	if s.HighState == "LH" && s.LowState == "LL" {
-		short += 10
-	}
-	if l.NearestSupport > 0 && pct(m.Price, l.NearestSupport) < 2 {
-		lg += 15
-	}
-	if l.NearestResistance > 0 && pct(l.NearestResistance, m.Price) < 2 {
-		sg += 15
-	}
-	if l.RangeToATR1h >= 2 && l.RangeWidthPct >= 2 {
-		lg += 20
-		sg += 20
-	}
-	if ind.ATR1hPct >= 0.5 {
-		lg += 15
-		sg += 15
-	}
-	if ind.VolumeRatio1h >= 1.1 {
-		lg += 10
-		sg += 10
-	}
-	if s.HighState == "LH" {
-		sg += 10
-	}
-	if s.LowState == "HL" {
-		lg += 10
-	}
-	if l.RangePositionPct < 35 {
-		lg += 15
-	}
-	if l.RangePositionPct > 65 {
-		sg += 15
-	}
-	if tr.EMA20_1h > tr.EMA50_1h && tr.EMA50_1h > tr.EMA200_1h {
-		ng -= 15
-	} else {
-		ng += 5
-	}
-	if math.Abs(mom.Change24hPct) < 5 {
-		ng += 15
-	}
-	if l.RangeWidthPct >= 2 && l.RangeWidthPct <= 15 {
-		ng += 25
-	}
-	if ind.RSI1h >= 40 && ind.RSI1h <= 60 {
-		ng += 15
-	}
-	if math.Abs(btc.Relative1hPct) > 1.5 {
-		if btc.Relative1hPct > 0 {
-			long += 5
+	tf5, tf15, tf1, tf4, tfD := tf(c5, ticker.LastPrice, 288), tf(c15, ticker.LastPrice, 192), tf(c1, ticker.LastPrice, 168), tf(c4, ticker.LastPrice, 180), tf(cD, ticker.LastPrice, 90)
+	rng := analyzeRange(c15)
+	mr, grid := classifyRegime(tf15, tf1, tf4, rng)
+	s5, s15, s1, s4 := structure(c5, 3), structure(c15, 3), structure(c1, 3), structure(c4, 2)
+	buy, sell := 0.0, 0.0
+	for _, x := range trades {
+		v := x.Price * x.Size
+		if x.Side == "Buy" {
+			buy += v
 		} else {
-			short += 5
+			sell += v
 		}
 	}
-
-	if ind.RSI4h14d > 80 && ind.RSI4h < 70 {
-		short += 15
+	delta := 0.0
+	if buy+sell > 0 {
+		delta = (buy - sell) / (buy + sell) * 100
 	}
-	if ind.RSI4h14d > 80 && ind.RSI4h > 80 {
-		short += 5
+	var first, lastT time.Time
+	coverage := 0.0
+	if len(trades) > 0 {
+		first = trades[0].Time
+		lastT = trades[len(trades)-1].Time
+		coverage = lastT.Sub(first).Seconds()
 	}
-	if ind.RSI4h14d < 30 && ind.RSI4h > 50 {
-		long += 15
+	markP, indexP := 0.0, 0.0
+	if len(mark) > 0 {
+		markP = mark[len(mark)-1].Close
 	}
-	if ind.RSI4h14d < 30 && ind.RSI4h < 30 {
-		long += 5
+	if len(index) > 0 {
+		indexP = index[len(index)-1].Close
 	}
-	if mom.Change14dPct > 20 && mom.Change4hPct > 0 {
-		long += 10
+	btcTicker, _ := api.Ticker(ctx, "BTCUSDT")
+	btc1, _ := api.KlinesRange(ctx, "BTCUSDT", "60", 720)
+	btc := BTCContext{Price: btcTicker.LastPrice}
+	if len(btc1) > 25 {
+		bp := closes(btc1)
+		btc.Change1hPct = indicators.PercentChange(bp, 1)
+		btc.Change4hPct = indicators.PercentChange(bp, 4)
+		btc.Change24hPct = indicators.PercentChange(bp, 24)
+		btc.Correlation1h30d = corrReturns(c1, btc1, 720)
+		btc.RelativeStrength24hPct = ticker.Price24hPct - btc.Change24hPct
 	}
-	if mom.Change14dPct < -20 && mom.Change4hPct < 0 {
-		short += 10
+	longNow := 0.0
+	if len(ls) > 0 {
+		longNow = ls[len(ls)-1].LongRatio
 	}
-	if tr.EMA20_4h_14d > tr.EMA50_4h_14d && tr.EMA20_4h > tr.EMA50_4h {
-		long += 10
+	fundNow := ticker.FundingRate
+	if len(funding) > 0 {
+		fundNow = funding[len(funding)-1].Rate
 	}
-	if tr.EMA20_4h_14d < tr.EMA50_4h_14d && tr.EMA20_4h < tr.EMA50_4h {
-		short += 10
+	oi15, oi1, oi4, oi24 := oiChange(oi, 3), oiChange(oi, 12), oiChange(oi, 48), oiChange(oi, 287)
+	flow1m, flow5m, flow15m := flow(trades, time.Minute), flow(trades, 5*time.Minute), flow(trades, 15*time.Minute)
+	// Directional evidence использует taker delta только при наличии полного 1m окна.
+	// Snapshot короче минуты остаётся в JSON, но не получает права влиять на bullish/bearish evidence.
+	directionalDelta := 0.0
+	if flow1m.Available {
+		directionalDelta = flow1m.DeltaPct
 	}
-	if l.Range14dPositionPct > 90 {
-		short += 10
-		sg += 15
-	}
-	if l.Range14dPositionPct < 10 {
-		long += 10
-		lg += 15
-	}
-	if ind.ATR4h14d < ind.ATR4h*0.7 && ind.ATR4h14d > 0 {
-		lg += 10
-		sg += 10
-	}
-	if ind.ATR4h14d > ind.ATR4h*1.5 {
-		if mom.Change14dPct > 0 {
-			long += 10
-		} else {
-			short += 10
-		}
-	}
-	if m.Price > l.Range14dHigh && ind.VolumeRatio14d > 1.2 {
-		long += 10
-	}
-	if m.Price < l.Range14dLow && ind.VolumeRatio14d > 1.2 {
-		short += 10
-	}
-	if tr.PriceVsEMA20_4h_14dPct > 30 {
-		short += 5
-	}
-	if tr.PriceVsEMA20_4h_14dPct < -20 {
-		long += 5
-	}
-	if mom.Change14dPct > 10 && ind.RSI4h14d < ind.RSI4h {
-		short += 10
-	}
-	if mom.Change14dPct < -10 && ind.RSI4h14d > ind.RSI4h {
-		long += 10
-	}
-
-	return Strategies{
-		Long:        mk(long, "directional trend + momentum + volume + derivatives + 14d context"),
-		LongGrid:    mk(lg, "trend + volatility + support + grid range + 14d range"),
-		NeutralGrid: mk(ng, "range + trend neutrality + volatility + price position + liquidity"),
-		Short:       mk(short, "directional downtrend + momentum + volume + derivatives + 14d context"),
-		ShortGrid:   mk(sg, "impulse + volatility + structure + resistance + derivatives + 14d range"),
-	}
+	dir := analyzeDirectional(tf15, tf1, tf4, rng, oi1, oi4, directionalDelta, s1, s4)
+	counts := map[string]int{"5m": len(c5), "15m": len(c15), "1h": len(c1), "4h": len(c4), "1d": len(cD), "oi_5m": len(oi), "long_short_5m": len(ls), "funding": len(funding), "recent_trades": len(trades), "mark_price_1m": len(mark), "index_price_1m": len(index)}
+	depth := map[string]string{"5m": "~72 часа", "15m": "~14 дней", "1h": "~60 дней", "4h": "~180 дней", "1d": "~365 дней", "oi_5m": "~24 часа", "long_short_5m": "~24 часа", "mark/index_1m": "~60 минут"}
+	quality := map[string]string{"ohlcv": "high", "derivatives": "high", "order_book": "snapshot_only", "recent_trades": "coverage_reported", "mark_index": "60m_1m"}
+	ai := AIInstructions{"Проведи независимую интерпретацию raw evidence и derived metrics. Интегральные score намеренно отсутствуют: факторы имеют разный приоритет и не должны механически складываться.", []string{"1. Проверить data_quality и временное покрытие.", "2. Сначала определить regime и его переходы.", "3. Для GRID проверить stationarity/mean reversion/breakout risk, затем направление.", "4. Для directional приоритет: 4h/1h structure, impulse/pullback, volume и price-OI state; вторичные индикаторы использовать как контекст.", "5. Проверить derived metrics по raw evidence.", "6. Только внешний ИИ/человек формирует OPEN/WAIT/NO-GRID, entry, SL и targets."}, []string{"Нет score и скрытых весов: hard blocks, primary evidence, secondary evidence и risks разделены явно.", "Recent trades могут покрывать очень короткий период; taker_flow_windows.available=true только при полном временном покрытии окна.", "Order book — моментальный snapshot.", "Сильный trend/expansion плох для GRID, но может быть полезен directional."}, []string{"strategy", "status", "direction", "entry_condition", "grid_range или entry", "stop_loss", "targets", "аргументы и invalidation"}}
+	return Report{"3.2", "3.2.0", timeNowUTC(), "Bybit", "linear / USDT perpetual", symbol, request, "Evidence-first deep analysis без интегральных score; финальную интерпретацию выполняет внешний ИИ/человек.", DataQuality{len(warnings) == 0, warnings, counts, depth, quality}, Market{ticker.LastPrice, ticker.Price24hPct, ticker.High24h, ticker.Low24h, ticker.Turnover24h, ticker.Volume24h, pct(ticker.AskPrice, ticker.BidPrice), ticker.FundingRate, ticker.OpenInterest, ticker.OpenInterestValue}, map[string]Timeframe{"5m": tf5, "15m": tf15, "1h": tf1, "4h": tf4, "1d": tfD}, map[string]StructureAnalysis{"5m": s5, "15m": s15, "1h": s1, "4h": s4}, mr, regimeHistory(c15), rng, grid, dir, Derivatives{funding, fundNow, avgFunding(funding, 24*time.Hour), avgFunding(funding, 7*24*time.Hour), percentile(funding, fundNow), oi, oi15, oi1, oi4, oi24, priceOIState(tf1.ChangePct, oi1), priceOIState(indicators.PercentChange(closes(c1), 4), oi4), ls, longNow, lsChange(ls, 12), lsChange(ls, 48), lsChange(ls, 287)}, Microstructure{ob, len(trades), first, lastT, coverage, buy, sell, delta, []FlowWindow{flow1m, flow5m, flow15m}, markP, indexP, pct(markP, indexP), pct(ticker.LastPrice, markP)}, btc, RawEvidence{c5, c15, c1, c4, cD, trades, mark, index}, ai}, nil
 }
 
-func mk(score int, reason string) Strategy {
-	if score < 0 {
-		score = 0
-	}
-	if score > 100 {
-		score = 100
-	}
-	status := "avoid"
-	if score >= 75 {
-		status = "consider"
-	} else if score >= 55 {
-		status = "watch"
-	} else if score >= 35 {
-		status = "risky"
-	}
-	return Strategy{Score: score, Status: status, Reason: reason}
-}
+// timeNowUTC вынесена отдельно, чтобы generated_at всегда был явно UTC.
+func timeNowUTC() time.Time { return time.Now().UTC() }

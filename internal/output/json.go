@@ -1,3 +1,4 @@
+// Package output отвечает только за сериализацию результата.
 package output
 
 import (
@@ -5,13 +6,12 @@ import (
 	"io"
 )
 
-// WriteJSON отвечает только за форматирование результата. Отдельный пакет
-// позволяет без изменения аналитики позже добавить запись в файл/HTTP API.
+// WriteJSON пишет UTF-8 JSON без HTML-экранирования и с опциональными отступами.
 func WriteJSON(w io.Writer, value any, pretty bool) error {
-	enc := json.NewEncoder(w)
+	e := json.NewEncoder(w)
+	e.SetEscapeHTML(false)
 	if pretty {
-		enc.SetIndent("", "  ")
+		e.SetIndent("", "  ")
 	}
-	enc.SetEscapeHTML(false)
-	return enc.Encode(value)
+	return e.Encode(value)
 }

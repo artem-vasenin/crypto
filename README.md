@@ -1,534 +1,239 @@
-# Crypto Coin Analyzer
+# Bybit Universal Deep Coin Analyzer v3.2
 
-CLI-приложение для глубокого анализа **одной монеты Bybit USDT Perpetual**.
+Универсальный evidence-first анализатор публичных данных Bybit V5 для второго этапа исследования кандидатов. Программа собирает глубокую историю, рассчитывает нейтральные признаки для GRID и обычных directional LONG/SHORT позиций и сохраняет **один самодостаточный JSON на символ**. Финальное решение OPEN/WAIT/NO-GRID/REJECT программа намеренно не принимает: его должен делать внешний ИИ или человек после проверки raw evidence.
 
-Главная идея проекта: вместо скриннинга сотен монет приложение принимает один символ, например `SOLUSDT`, собирает для него технические, рыночные и деривативные данные и формирует большой JSON. Этот JSON можно целиком передать ИИ и попросить определить, есть ли смысл искать `LONG`, `SHORT` или лучше `WAIT`.
+## Главное в v3.2
 
-Структура JSON намеренно близка к формату твоего Bybit-скринера: `market`, `indicators`, `trend`, `momentum`, `volume`, `structure`, `levels`, `derivatives`, `order_book`, `strategies`. Дополнительно добавлен отдельный блок `btc_context`, потому что для directional Long/Short важно понимать состояние BTC и возможный lead-lag.
+- Интерактивный выбор: `GRID`, `Directional` или `Полный анализ`; **Enter = Полный анализ**.
+- Направление: `LONG`, `SHORT`, `LONG + SHORT`; **Enter = LONG + SHORT**.
+- 1–10 символов через запятую без пробелов: `BTC,ETH,SOL`; сокращения автоматически становятся `BTCUSDT`.
+- Предварительная проверка символов до тяжёлой загрузки.
+- Raw evidence сохраняется **всегда**, отдельного переключателя нет.
+- Независимые `market_regime`, `grid_analysis` и `directional_analysis`.
+- Противоположные bullish/bearish/conflicting evidence не скрываются даже при выборе одного направления.
+- После анализа Enter запускает новый сеанс.
 
-## Что получает приложение
+## Требования и запуск
 
-Используются публичные REST API Bybit V5, без API key:
-
-- ticker текущего линейного контракта;
-- 15m / 1h / 4h свечи;
-- до 7 дней 1m свечей для краткосрочного BTC lead-lag;
-- BTCUSDT ticker и 1m свечи;
-- funding rate и историю funding;
-- open interest и изменение OI;
-- long/short ratio;
-- стакан до 200 уровней.
-
-Bybit документирует `kline`, `tickers`, `orderbook`, `open interest`, funding history и long/short ratio как публичные V5 market endpoints. В частности, kline поддерживает интервалы от 1 минуты до месяца, а orderbook для linear-контрактов — до 1000 уровней в API, хотя приложение намеренно использует 200, чтобы сохранить совместимость с текущей схемой твоего скринера.
-
-## Основные возможности
-
-### 1. Технический анализ
-
-Рассчитываются:
-
-- RSI 15m / 1h / 4h;
-- ATR 15m / 1h / 4h;
-- ATR в процентах от цены;
-- EMA 20 / 50 / 200 на 15m / 1h / 4h;
-- отклонение цены от EMA на 1h;
-- изменение цены за 1h / 4h / 12h / 24h;
-- volume ratio;
-- объёмы 5m / 15m / 1h.
-
-### 2. Структура рынка
-
-На 1h истории ищутся простые pivot high / pivot low.
-
-На их основе определяется:
-
-- `HH` / `LH` для максимумов;
-- `HL` / `LL` для минимумов;
-- последние pivot highs/lows.
-
-Это не пытается изображать из себя полноценный Smart Money индикатор. Цель — дать ИИ исходные факты для проверки структуры.
-
-### 3. Support / Resistance
-
-Определяются ближайшие уровни сопротивления и поддержки на последнем участке 1h истории.
-
-Также рассчитываются:
-
-- ширина диапазона;
-- положение текущей цены внутри диапазона;
-- отношение диапазона к ATR 1h.
-
-Эти поля особенно полезны для оценки grid-сценариев.
-
-### 4. Деривативы
-
-В JSON попадают:
-
-- текущий funding;
-- средний funding по последним значениям;
-- Open Interest;
-- изменение OI;
-- long/short ratio.
-
-Важно: `openInterest` у Bybit имеет единицу измерения, зависящую от типа контракта. Здесь используется `linear`, поэтому значение относится к базовой монете; Bybit также отдаёт `openInterestValue`, но для текущего анализа основной акцент сделан на OI и его изменении.
-
-### 5. Стакан
-
-Рассчитываются:
-
-- суммарный bid notional;
-- суммарный ask notional;
-- imbalance в процентах;
-- bid/ask ratio;
-- spread;
-- количество использованных уровней.
-
-### 6. BTC context
-
-Это отдельная важная часть проекта.
-
-Приложение сравнивает минутные доходности монеты и BTCUSDT и проверяет несколько лагов:
-
-- 0 минут;
-- 1 минута;
-- 2 минуты;
-- 3 минуты;
-- 5 минут;
-- 10 минут.
-
-В JSON попадут, например:
-
-```json
-"btc_context": {
-  "corr_1m_0": 0.71,
-  "corr_1m_1": 0.76,
-  "corr_1m_2": 0.81,
-  "corr_1m_3": 0.84,
-  "corr_1m_5": 0.77,
-  "corr_1m_10": 0.62,
-  "best_lag_minutes": 3,
-  "best_lag_correlation": 0.84
-}
-```
-
-Это не торговый сигнал само по себе. Корреляция показывает статистическую связь на выбранном окне, а не гарантирует, что монета обязательно «догонит» BTC.
-
-## Структура проекта
-
-```text
-crypto-coin-analyzer/
-├── cmd/
-│   └── analyzer/
-│       └── main.go
-├── internal/
-│   ├── analysis/
-│   │   ├── build.go
-│   │   ├── build_test.go
-│   │   └── types.go
-│   ├── bybit/
-│   │   └── client.go
-│   ├── indicators/
-│   │   ├── indicators.go
-│   │   └── indicators_test.go
-│   └── output/
-│       └── json.go
-├── testdata/
-├── .gitignore
-├── go.mod
-├── Makefile
-└── README.md
-```
-
-## Описание каждого файла
-
-### `cmd/analyzer/main.go`
-
-Точка входа приложения.
-
-Функции и ответственность:
-
-- разбирает CLI-параметры;
-- проверяет символ;
-- ограничивает глубину 1m истории диапазоном 1–7 дней;
-- создаёт Bybit-клиент;
-- вызывает `analysis.Build`;
-- выводит JSON в stdout;
-- при `-out` дополнительно сохраняет JSON в файл.
-
-Основная функция:
-
-- `main()` — запуск анализа и обработка ошибок.
-
-### `internal/bybit/client.go`
-
-Низкоуровневый публичный клиент Bybit V5.
-
-Основные функции:
-
-- `NewClient()` — создаёт HTTP-клиент;
-- `get()` — общий GET-запрос, проверка HTTP и `retCode` Bybit;
-- `Ticker()` — текущий ticker;
-- `Klines()` — исторические свечи;
-- `Funding()` — история funding;
-- `OpenInterest()` — история OI;
-- `LongShort()` — long/short ratio;
-- `OrderBook()` — snapshot стакана.
-
-Здесь специально нет API key/secret: приложение работает только с публичными market endpoints.
-
-### `internal/indicators/indicators.go`
-
-Чистые математические функции индикаторов.
-
-Основные функции:
-
-- `EMA()` — экспоненциальная скользящая средняя;
-- `RSI()` — Relative Strength Index;
-- `ATR()` — Average True Range;
-- `PercentChange()` — процентное изменение;
-- `Mean()` — среднее значение;
-- `Std()` — стандартное отклонение;
-- `Correlation()` — корреляция Пирсона;
-- `Returns()` — последовательность доходностей;
-- `VolumeRatio()` — отношение среднего короткого объёма к длинному.
-
-Файл не знает ничего о Bybit — поэтому индикаторы легко тестировать отдельно.
-
-### `internal/indicators/indicators_test.go`
-
-Unit-тесты математической части.
-
-Проверяются:
-
-- EMA;
-- RSI на растущем ряду;
-- Pearson correlation.
-
-### `internal/analysis/types.go`
-
-Все структуры итогового JSON.
-
-Здесь описаны:
-
-- `Report`;
-- `Market`;
-- `Indicators`;
-- `Trend`;
-- `Momentum`;
-- `Volume`;
-- `Structure`;
-- `Levels`;
-- `Derivatives`;
-- `OrderBook`;
-- `BTCContext`;
-- `Strategies`;
-- `AIInstructions`.
-
-Изменяя этот файл, можно расширять формат JSON без изменения CLI.
-
-### `internal/analysis/build.go`
-
-Главный аналитический модуль.
-
-Основные функции:
-
-- `Build()` — собирает данные и формирует полный `Report`;
-- `buildStructure()` — определяет pivot highs/lows и HH/LH/HL/LL;
-- `buildLevels()` — рассчитывает support/resistance и характеристики диапазона;
-- `buildBTCContext()` — рассчитывает BTC lead-lag;
-- `alignReturns()` — выравнивает минутные доходности;
-- `lagCorr()` — считает корреляцию при выбранном лаге;
-- `scoreStrategies()` — даёт вспомогательные scores для Long/Short и grid-стратегий;
-- `mk()` — переводит score в статус `avoid/risky/watch/consider`.
-
-`scoreStrategies()` намеренно остаётся вспомогательным. ИИ получает все исходные данные и не должен слепо доверять этому score.
-
-### `internal/analysis/build_test.go`
-
-Интеграционный unit-тест аналитического сборщика с fake Bybit API.
-
-Вместо реального интернета используется `fakeAPI`, поэтому тест:
-
-- быстрый;
-- детерминированный;
-- не зависит от текущего рынка;
-- не требует API key;
-- не создаёт нагрузку на Bybit.
-
-### `internal/output/json.go`
-
-Минимальный слой сериализации.
-
-Основная функция:
-
-- `WriteJSON()` — пишет JSON с опциональным pretty formatting.
-
-Отдельный пакет оставлен специально, чтобы позднее можно было добавить другие форматы или HTTP-вывод, не смешивая это с аналитикой.
-
-### `Makefile`
-
-Команды разработки:
-
-```text
-make fmt    # gofmt
-make vet    # go vet
-make test   # форматирование + unit tests
-make build  # test + сборка бинарника
-make run    # пример запуска SOLUSDT
-make clean  # удаление локальных результатов
-```
-
-### `.gitignore`
-
-Исключает бинарники, логи, JSON-результаты локальных запусков и файлы IDE/macOS.
-
-### `go.mod`
-
-Описание Go-модуля и версии языка.
-
-Проект написан на стандартной библиотеке Go и не имеет внешних зависимостей. В архиве указана минимальная совместимая версия Go, использованная для проверки; на Go 1.26 проект также должен собираться без изменений.
-
-## Установка
-
-Требуется Go 1.23+.
-
-Проверка:
-
-```bash
-go version
-```
-
-Клонирование/распаковка проекта и переход в каталог:
-
-```bash
-cd crypto-coin-analyzer
-```
-
-Проверка проекта:
+Требуется Go 1.23+ и доступ к публичному Bybit V5 API. API-ключ не нужен.
 
 ```bash
 go test ./...
+go build -o coin-analyzer ./cmd/analyzer
+./coin-analyzer
 ```
 
-## Сборка:
+Windows PowerShell:
 
-Дефолтная ОС
-```bash
-go build -o crypto-coin-analyzer ./cmd/analyzer
+```powershell
+go test ./...
+go build -o coin-analyzer.exe ./cmd/analyzer
+.\coin-analyzer.exe
 ```
 
-Windows
-```bash
-GOOS=windows GOARCH=amd64 go build -o crypto-coin-analyzer.exe ./cmd/analyzer
-```
+Отчёты создаются в `reports/` рядом с бинарником.
 
-## Запуск
-
-Самый простой вариант:
-
-```bash
-go run ./cmd/analyzer -symbol SOLUSDT
-```
-
-JSON будет выведен в stdout.
-
-С сохранением результата:
-
-```bash
-go run ./cmd/analyzer -symbol SOLUSDT -out SOLUSDT.json
-```
-
-С глубиной 3 дня для минутного BTC lead-lag:
-
-```bash
-go run ./cmd/analyzer -symbol SOLUSDT -days 3 -out SOLUSDT.json
-```
-
-После сборки:
-
-```bash
-./crypto-coin-analyzer -symbol SOLUSDT -out SOLUSDT.json
-```
-
-## Какие символы использовать
-
-Примеры:
+## Диалог
 
 ```text
-BTCUSDT
-ETHUSDT
-SOLUSDT
-XRPUSDT
-DOGEUSDT
-FARTCOINUSDT
+Что анализируем?
+1 — GRID BOT
+2 — Обычная позиция (Directional)
+3 — Полный анализ (GRID + Directional) [по умолчанию]
+Ваш выбор [3]:
+
+Какое направление анализируем?
+1 — LONG
+2 — SHORT
+3 — LONG + SHORT [по умолчанию]
+Ваш выбор [3]:
+
+Введите 1-10 символов через запятую БЕЗ пробелов:
+> BTC,ETH,SOL
 ```
 
-Нужен именно символ линейного USDT-контракта Bybit.
+Пустой Enter на первых двух вопросах означает `3`. Неверный символ не останавливает обработку остальных. После сеанса `Enter`/`1` — новый анализ, `0` — выход.
 
-## Формат результата
+## Глубина данных
 
-Верхний уровень JSON:
+Целевые объёмы OHLCV: 5m ≈ 72 часа (864 свечи), 15m ≈ 14 дней (1344), 1h ≈ 60 дней (1440), 4h ≈ 180 дней (1080), 1D ≈ 365 дней (365). Клиент использует пагинацию там, где одного ответа API недостаточно. Дополнительно собираются funding history, OI 5m ≈ 24h, long/short ratio 5m ≈ 24h, стакан до 500 уровней, до 1000 последних public trades, mark/index history и BTC-контекст.
 
-```text
-Report
-├── generated_at
-├── exchange
-├── category
-├── symbol
-├── purpose
-├── data_quality
-├── market
-├── indicators
-├── trend
-├── momentum
-├── volume
-├── structure
-├── levels
-├── derivatives
-├── order_book
-├── btc_context
-├── strategies
-└── ai_instructions
-```
+Фактическое число записей и предупреждения записываются в `data_quality`. Неполный secondary endpoint не уничтожает весь отчёт; критически недостаточная основная OHLCV-история останавливает отчёт по конкретному символу.
 
-### `market`
+## Структура JSON
 
-Текущая цена, изменения 24h/3d/7d, оборот, объём и spread.
-
-### `indicators`
-
-RSI и ATR на нескольких таймфреймах.
-
-### `trend`
-
-EMA 20/50/200 и расстояние цены до EMA.
-
-### `momentum`
-
-Изменение цены на нескольких горизонтах.
-
-### `volume`
-
-Текущие объёмы и volume ratios.
-
-### `structure`
-
-Pivot levels и HH/LH/HL/LL.
-
-### `levels`
-
-Support/resistance и характеристики диапазона.
-
-### `derivatives`
-
-Funding, OI и long/short ratio.
-
-### `order_book`
-
-Дисбаланс bid/ask и ликвидность в стакане.
-
-### `btc_context`
-
-Состояние BTC, относительная доходность и проверка lead-lag.
-
-### `strategies`
-
-Вспомогательные scores для пяти знакомых стратегий:
-
-- long;
-- long-grid;
-- neutral-grid;
-- short;
-- short-grid.
-
-### `ai_instructions`
-
-Готовый контекст для ИИ: что анализировать, какие правила соблюдать и какие поля желательно вернуть.
-
-## Как использовать JSON с ИИ
-
-После запуска:
-
-```bash
-go run ./cmd/analyzer -symbol SOLUSDT -out SOLUSDT.json
-```
-
-Открываешь `SOLUSDT.json`, копируешь его в ИИ и даёшь запрос примерно такого типа:
-
-```text
-Ты — криптоаналитик. Проанализируй JSON одной монеты Bybit.
-
-Определи, есть ли сейчас обоснованный сценарий LONG или SHORT.
-
-Не доверяй strategy score вслепую. Проверь исходные данные.
-
-Отдельно проверь:
-- структуру 15m/1h/4h;
-- EMA и momentum;
-- RSI и ATR;
-- объём;
-- support/resistance;
-- funding;
-- Open Interest;
-- long/short ratio;
-- стакан;
-- движение BTC;
-- BTC lead-lag;
-- противоречия между показателями.
-
-Если преимущества одной стороны нет — дай WAIT.
-
-Для выбранного сценария дай:
-1. LONG / SHORT / WAIT.
-2. Уверенность 0-100.
-3. Зону входа.
-4. SL.
-5. TP1/TP2/TP3.
-6. Основной сценарий.
-7. Условие отмены сценария.
-8. Главные аргументы ЗА.
-9. Главные аргументы ПРОТИВ.
-```
-
-## Важное ограничение
-
-Это аналитический сборщик, а не торговый бот.
-
-Он **не открывает позиции**, не хранит API keys и не отправляет ордера.
-
-Особенно важно не интерпретировать BTC lead-lag как гарантированный арбитраж. Корреляция на историческом окне может исчезнуть, измениться при смене режима рынка или быть вызвана общим фактором, а не настоящей причинной задержкой.
+- `request` — что выбрал пользователь; это контекст, а не приказ алгоритму искать подтверждение.
+- `data_quality` — полнота, warnings, фактические counts и целевая глубина.
+- `market` — текущий snapshot.
+- `timeframes` — RSI/ATR/ADX/EMA/Efficiency Ratio/realized vol/Bollinger width/volume ratio и геометрия окна.
+- `market_regime` — нейтральное описание ranging/trending/compression/expansion/breakout risk.
+- `range_analysis` — границы, midpoint, touches, midpoint crosses, false breaks, slope.
+- `grid_analysis` — пригодность режима для grid, range/mean-reversion quality, breakout risk и независимые LONG/SHORT evidence.
+- `directional_analysis` — независимые LONG/SHORT evidence для обычной позиции, конфликты, контекст invalidation/targets.
+- `derivatives` — funding/OI/long-short history и агрегаты.
+- `microstructure` — order book, taker delta, mark/index отклонения.
+- `btc_context` — корреляция и относительная сила к BTC.
+- `raw_evidence` — полные OHLCV, recent trades, mark/index history. Сохраняется всегда.
+- `ai_instructions` — подсказка внешнему ИИ: перепроверять derived metrics по raw evidence и соблюдать иерархию evidence.
 
 ## Проверка проекта
 
-Локально выполнено:
+Перед использованием выполнить:
 
-```text
+```bash
+gofmt -w ./cmd ./internal
 go test ./...
-
-?    crypto-coin-analyzer/cmd/analyzer       [no test files]
-?    crypto-coin-analyzer/internal/bybit    [no test files]
-ok   crypto-coin-analyzer/internal/analysis
-?    crypto-coin-analyzer/internal/output    [no test files]
-ok   crypto-coin-analyzer/internal/indicators
+go vet ./...
+go build ./cmd/analyzer
 ```
 
-Тесты используют mock/fake API.
+Для live smoke-test запустить один ликвидный символ (`BTC`), дождаться JSON и проверить: `generated_at` свежий; `data_quality.counts` разумны; OHLCV отсортирован по времени; `raw_evidence` не пуст; `request` соответствует меню; JSON открывается стандартным parser. Ошибки сети/лимитов Bybit должны появляться в консоли и/или `data_quality.warnings`, а не маскироваться.
 
-В среде сборки отсутствовал исходящий интернет, поэтому реальный запуск бинарника против `api.bybit.com` из sandbox выполнить не удалось. Формат и endpoints сверены с актуальной документацией Bybit V5; live-интеграционный тест нужно выполнить уже на твоём Mac/VPS с интернетом.
+## Все файлы и функции
 
-## Что можно улучшить во второй версии
+### `cmd/analyzer/main.go`
+Интерактивный CLI.
+- `getExeDir` — находит директорию бинарника.
+- `normalizeSymbol` — нормализует `BTC` → `BTCUSDT`.
+- `parseSymbols` — валидирует список, удаляет дубликаты, максимум 10.
+- `askChoice` — универсальное меню с выбором по Enter.
+- `chooseRequest` — собирает тип анализа и направление.
+- `saveReport` — сохраняет timestamped JSON.
+- `analyzeSession` — проверяет символы и запускает глубокий анализ.
+- `askContinue` — новый сеанс/выход.
+- `main` — точка входа.
 
-Наиболее полезные следующие шаги:
+### `internal/analysis/types.go`
+Содержит структуры JSON: `Request`, `Report`, `DataQuality`, `Market`, `Timeframe`, `MarketRegime`, `RangeAnalysis`, `SideAssessment`, `GridAnalysis`, `DirectionalAnalysis`, `Derivatives`, `Microstructure`, `BTCContext`, `RawEvidence`, `AIInstructions`. Функций нет.
 
-1. Добавить более точный поиск зон поддержки/сопротивления через кластеризацию pivot levels.
-2. Добавить реальную оценку divergence RSI/цены.
-3. Добавить ATR expansion/contraction.
-4. Добавить liquidation data, если выбран подходящий публичный endpoint.
-5. Добавить funding trend, а не только среднее.
-6. Улучшить BTC lead-lag через rolling windows вместо одного общего окна.
-7. Добавить несколько BTC lead-lag окон: 30m, 2h, 6h.
-8. Добавить beta относительно BTC.
-9. Добавить нормализованную относительную силу монеты относительно BTC.
-10. Добавить исторический backtest самого lead-lag сигнала.
+### `internal/analysis/build.go`
+Оркестрация и derived analysis.
+- `closes`, `vols`, `ic` — преобразование свечей в массивы/тип indicators.
+- `last`, `pct`, `min`, `mean`, `tail` — вспомогательная математика.
+- `tf` — метрики одного timeframe.
+- `analyzeRange` — характеристики диапазона.
+- `classifyRegime` — market regime и GRID diagnostics без OPEN-сигнала.
+- `analyzeDirectional` — независимая LONG/SHORT directional диагностика.
+- Вспомогательные математические функции — безопасные расчёты процентов, окон и границ без интегральных score.
+- `oiChange` — изменение OI за заданное число точек.
+- `corrReturns` — корреляция доходностей.
+- `Build` — полный pipeline одного символа.
+- `timeNowUTC` — единый UTC timestamp.
 
-Последний пункт особенно важен: именно backtest покажет, является ли обнаруженный lag реальным торговым преимуществом или просто красивой корреляцией.
+### `internal/bybit/client.go`
+HTTP-клиент публичного Bybit V5.
+- `NewClient` — создаёт клиент.
+- `(*Client).get` — общий GET, обработка HTTP/Bybit ошибок.
+- `f64`, `i64` — преобразование строк API в числа.
+- `(*Client).Ticker` — ticker snapshot/валидация символа.
+- `(*Client).KlinesRange` — OHLCV с пагинацией.
+- `(*Client).priceKlinesRange` — общий загрузчик mark/index klines.
+- `(*Client).MarkKlinesRange` — mark-price history.
+- `(*Client).IndexKlinesRange` — index-price history.
+- `(*Client).Funding` — funding history.
+- `(*Client).OpenInterest` — OI history.
+- `(*Client).LongShort` — account long/short ratio history.
+- `(*Client).OrderBook` — стакан.
+- `(*Client).RecentTrades` — последние публичные сделки/taker side.
+
+### `internal/indicators/indicators.go`
+Чистая математика индикаторов.
+- `Mean`, `Std` — среднее и стандартное отклонение.
+- `EMA` — экспоненциальная средняя.
+- `RSI` — RSI.
+- `ATR` — Average True Range.
+- `PercentChange` — процентное изменение.
+- `Correlation` — корреляция Pearson.
+- `EfficiencyRatio` — направленность движения относительно шума.
+- `RealizedVolPct` — realized volatility.
+- `BollingerWidthPct` — ширина Bollinger Bands.
+- `ADX` — сила тренда.
+
+### `internal/indicators/indicators_test.go`
+Unit tests: `TestEMA`, `TestEfficiencyRatio`, `TestRSI`.
+
+### `internal/output/json.go`
+- `WriteJSON` — JSON encoder с optional pretty-print.
+
+### `go.mod`
+Модуль Go и версия языка; функций нет.
+
+### `.gitignore`
+Исключает бинарники, отчёты и служебные файлы.
+
+### `AGENTS.md`
+Полный handoff для ИИ/разработчика: цели, архитектура, инварианты, JSON, алгоритмы и правила расширения.
+
+## Важные ограничения
+
+Интегральные score намеренно отсутствуют: признаки сохраняются по иерархии значимости. Public trades — короткий snapshot, не полноценный исторический CVD. Стакан — моментальный снимок. Support/resistance/range — алгоритмические признаки, которые внешний ИИ должен перепроверять по raw OHLCV. При изменении Bybit API сначала обновляется клиент и тесты, затем аналитика.
+
+---
+
+## Изменения версии 3.1 — evidence hierarchy вместо score
+
+В 3.1 полностью удалены интегральные `score`, `suitability_score`, `range_quality` и другие числовые рейтинги, которые складывали разнородные признаки. Причина: RSI, структура 4h, breakout, OI и положение в диапазоне имеют разную причинную значимость, а произвольная арифметическая сумма создаёт ложную точность.
+
+Вместо этого аналитика строится иерархически:
+
+1. **Hard blocks** — условия, которые способны запретить GRID независимо от вторичных плюсов: дрейф диапазона, высокий breakout risk, сильный эффективный тренд.
+2. **Primary evidence** — ключевые признаки направления: multi-TF swing structure и другие наиболее содержательные факторы.
+3. **Secondary evidence** — контекстные подтверждения, которые не должны перевешивать primary evidence.
+4. **Risk factors / conflicts** — признаки, требующие осторожности или внешней проверки.
+5. **Raw evidence** — всегда сохраняется и имеет приоритет перед ошибочным derived label.
+
+Добавлены: подтверждённые swing points с timestamp для 5m/15m/1h/4h; rolling stationarity/drift range; история режима; OI 15m/1h/4h/24h; price+OI state; funding 24h/7d и percentile; long-ratio changes 1h/4h/24h; фактическое временное покрытие последних сделок и taker-flow окна 1m/5m/15m; mark/index history увеличена до 60 минут. Order book по-прежнему честно помечается как snapshot.
+
+### Важное правило интерпретации
+
+Поля `state`, `regime`, `primary_evidence`, `secondary_evidence`, `hard_blocks` и `risk_factors` — диагностические данные, а не команда на сделку. Финальные OPEN / WAIT / NO-GRID / REJECT, entry, grid range, SL и targets определяет внешний ИИ/человек после проверки raw evidence.
+
+## Актуальный перечень ключевых функций v3.2
+
+### `cmd/analyzer/main.go`
+- `main` — основной интерактивный цикл программы.
+- `askAnalysisType` — выбор GRID / Directional / полного анализа; Enter выбирает полный.
+- `askDirection` — выбор LONG / SHORT / обоих; Enter выбирает оба.
+- `askSymbols` — ввод, нормализация и ограничение списка символов десятью.
+- `runSession` — проверка символов, последовательный deep analysis и сохранение JSON.
+- `askContinue` — новый сеанс или завершение.
+
+### `internal/analysis/build.go`
+- `tf` — нейтральные метрики таймфрейма.
+- `analyzeRange` — 48h range, rolling drift/width и stationarity.
+- `swings` — подтверждённые pivot high/low с координатами.
+- `structure` — HH/HL/LH/LL на основе реальных swings.
+- `classifyRegime` — иерархическая regime/grid диагностика без score.
+- `analyzeDirectional` — evidence-first LONG/SHORT диагностика без score.
+- `oiChange`, `lsChange`, `priceOIState` — multi-window derivatives evidence.
+- `avgFunding`, `percentile` — контекст funding.
+- `flow` — taker-flow на доступных временных окнах.
+- `regimeHistory` — rolling история изменения режима.
+- `Build` — сбор всех данных и построение одного самодостаточного отчёта.
+
+### `internal/bybit/client.go`
+REST-клиент публичного Bybit V5: ticker, OHLCV с пагинацией, mark/index candles, funding, OI, long/short ratio, order book и public trades.
+
+### `internal/indicators/indicators.go`
+Чистые математические функции: Mean, Std, EMA, RSI, ATR, ADX, Efficiency Ratio, realized volatility, Bollinger width, percent change и correlation.
+
+### `internal/output/json.go`
+Сериализация отчёта в человекочитаемый JSON и безопасная запись файла.
+
+## Изменения v3.2 после live-теста BTC/ETH
+
+Версия 3.2 исправляет три проблемы, обнаруженные при сравнительном live-тесте v3.1 на BTCUSDT и ETHUSDT.
+
+1. **Taker-flow больше не притворяется полным временным окном.** REST endpoint recent public trades для активных linear-инструментов может вернуть 1000 сделок всего за несколько десятков секунд. Для окон `1m`, `5m`, `15m` теперь сохраняются `available`, `status`, требуемое и фактическое покрытие. Delta рассчитывается и используется directional-анализом только если выборка реально покрывает всё окно. Короткий snapshot остаётся в raw evidence и общих snapshot-полях, но не считается 1m/5m/15m сигналом.
+2. **Режим range получил семантику стационарности.** Вместо неоднозначного `RANGING` используются `RANGING_STATIONARY`, `RANGING_DRIFT_UP`, `RANGING_DRIFT_DOWN` (или `RANGING_DRIFT` при нулевом знаке), если более приоритетный trending/breakout/compression режим не сработал.
+3. **Outside-bar swings явно маркируются.** Свеча, которая одновременно является pivot high и pivot low, сохраняется в `last_swings` с `ambiguous_outside_bar=true`, но исключается из вычисления HH/HL/LH/LL. Это не позволяет одной широкой свече искусственно сформировать структуру.
+
+### Проверка исправлений
+
+```bash
+go test ./...
+go vet ./...
+go build ./cmd/analyzer
+```
+
+Для сравнительного live-теста рекомендуется снова запустить режим по умолчанию на `BTC,ETH`. На очень активном рынке ожидаемо, что `recent_trades` может покрывать меньше минуты; в этом случае `taker_flow_windows` честно покажет `insufficient_data`, а directional evidence не будет использовать краткий snapshot как минутный сигнал.

@@ -1,5 +1,5 @@
-// Публичный REST-клиент Bybit V5.
-// Авторизация здесь не нужна: используются только публичные market endpoints.
+// Package bybit содержит небольшой публичный REST-клиент Bybit V5.
+// API-ключ не требуется: анализатор читает только общедоступные рыночные данные.
 package bybit
 
 import (
@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -17,18 +18,20 @@ type Config struct {
 	BaseURL string
 	Timeout time.Duration
 }
-
 type Client struct {
 	baseURL string
 	http    *http.Client
 }
 
+// NewClient создаёт HTTP-клиент с заданным базовым URL и таймаутом.
 func NewClient(cfg Config) *Client {
-	timeout := cfg.Timeout
-	if timeout == 0 {
-		timeout = 20 * time.Second
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "https://api.bybit.com"
 	}
-	return &Client{baseURL: cfg.BaseURL, http: &http.Client{Timeout: timeout}}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 20 * time.Second
+	}
+	return &Client{baseURL: cfg.BaseURL, http: &http.Client{Timeout: cfg.Timeout}}
 }
 
 type envelope struct {
@@ -37,140 +40,213 @@ type envelope struct {
 	Result  json.RawMessage `json:"result"`
 }
 
+// get выполняет GET-запрос и распаковывает стандартный envelope Bybit V5.
 func (c *Client) get(ctx context.Context, path string, q url.Values, dst any) error {
 	u := c.baseURL + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "crypto-coin-analyzer/1.0")
-
+	req.Header.Set("User-Agent", "crypto-coin-analyzer-deep/2.0")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return fmt.Errorf("чтение ответа %s: %w", path, err)
+		return err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("Bybit HTTP %d: %s", resp.StatusCode, string(body))
 	}
-
 	var env envelope
-	if err := json.Unmarshal(body, &env); err != nil {
-		return fmt.Errorf("разбор ответа %s: %w", path, err)
+	if err = json.Unmarshal(body, &env); err != nil {
+		return err
 	}
 	if env.RetCode != 0 {
 		return fmt.Errorf("Bybit retCode=%d: %s", env.RetCode, env.RetMsg)
 	}
-	if err := json.Unmarshal(env.Result, dst); err != nil {
+	if err = json.Unmarshal(env.Result, dst); err != nil {
 		return fmt.Errorf("разбор result %s: %w", path, err)
 	}
 	return nil
 }
 
+func f64(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
+func i64(s string) int64   { v, _ := strconv.ParseInt(s, 10, 64); return v }
+
 type Ticker struct {
-	Symbol            string
-	LastPrice         float64
-	PrevPrice24h      float64
-	Price24hPct       float64
-	High24h           float64
-	Low24h            float64
-	Turnover24h       float64
-	Volume24h         float64
-	FundingRate       float64
-	OpenInterest      float64
-	OpenInterestValue float64
-	BidPrice          float64
-	AskPrice          float64
-	BidSize           float64
-	AskSize           float64
+	Symbol                                                                                                                                              string
+	LastPrice, Price24hPct, High24h, Low24h, Turnover24h, Volume24h, FundingRate, OpenInterest, OpenInterestValue, BidPrice, AskPrice, BidSize, AskSize float64
 }
 
+// Ticker проверяет существование linear-символа и возвращает текущий тикер.
 func (c *Client) Ticker(ctx context.Context, symbol string) (Ticker, error) {
 	var r struct {
 		List []struct {
-			Symbol            string `json:"symbol"`
-			LastPrice         string `json:"lastPrice"`
-			PrevPrice24h      string `json:"prevPrice24h"`
-			Price24hPcnt      string `json:"price24hPcnt"`
-			HighPrice24h      string `json:"highPrice24h"`
-			LowPrice24h       string `json:"lowPrice24h"`
-			Turnover24h       string `json:"turnover24h"`
-			Volume24h         string `json:"volume24h"`
-			FundingRate       string `json:"fundingRate"`
-			OpenInterest      string `json:"openInterest"`
-			OpenInterestValue string `json:"openInterestValue"`
-			Bid1Price         string `json:"bid1Price"`
-			Ask1Price         string `json:"ask1Price"`
-			Bid1Size          string `json:"bid1Size"`
-			Ask1Size          string `json:"ask1Size"`
+			Symbol       string `json:"symbol"`
+			LastPrice    string `json:"lastPrice"`
+			Price24hPcnt string `json:"price24hPcnt"`
+			High         string `json:"highPrice24h"`
+			Low          string `json:"lowPrice24h"`
+			Turnover     string `json:"turnover24h"`
+			Volume       string `json:"volume24h"`
+			Funding      string `json:"fundingRate"`
+			OI           string `json:"openInterest"`
+			OIV          string `json:"openInterestValue"`
+			Bid          string `json:"bid1Price"`
+			Ask          string `json:"ask1Price"`
+			BidSize      string `json:"bid1Size"`
+			AskSize      string `json:"ask1Size"`
 		} `json:"list"`
 	}
-	q := url.Values{"category": {"linear"}, "symbol": {symbol}}
-	if err := c.get(ctx, "/v5/market/tickers", q, &r); err != nil {
+	if err := c.get(ctx, "/v5/market/tickers", url.Values{"category": {"linear"}, "symbol": {symbol}}, &r); err != nil {
 		return Ticker{}, err
 	}
 	if len(r.List) == 0 {
-		return Ticker{}, fmt.Errorf("символ %s не найден на Bybit linear", symbol)
+		return Ticker{}, fmt.Errorf("символ %s не найден среди Bybit linear", symbol)
 	}
 	x := r.List[0]
-	f := func(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
-	return Ticker{Symbol: x.Symbol, LastPrice: f(x.LastPrice), PrevPrice24h: f(x.PrevPrice24h), Price24hPct: f(x.Price24hPcnt) * 100,
-		High24h: f(x.HighPrice24h), Low24h: f(x.LowPrice24h), Turnover24h: f(x.Turnover24h), Volume24h: f(x.Volume24h), FundingRate: f(x.FundingRate),
-		OpenInterest: f(x.OpenInterest), OpenInterestValue: f(x.OpenInterestValue), BidPrice: f(x.Bid1Price), AskPrice: f(x.Ask1Price), BidSize: f(x.Bid1Size), AskSize: f(x.Ask1Size)}, nil
+	return Ticker{x.Symbol, f64(x.LastPrice), f64(x.Price24hPcnt) * 100, f64(x.High), f64(x.Low), f64(x.Turnover), f64(x.Volume), f64(x.Funding), f64(x.OI), f64(x.OIV), f64(x.Bid), f64(x.Ask), f64(x.BidSize), f64(x.AskSize)}, nil
 }
 
 type Candle struct {
-	Time                                     time.Time
-	Open, High, Low, Close, Volume, Turnover float64
+	Time     time.Time `json:"time"`
+	Open     float64   `json:"open"`
+	High     float64   `json:"high"`
+	Low      float64   `json:"low"`
+	Close    float64   `json:"close"`
+	Volume   float64   `json:"volume"`
+	Turnover float64   `json:"turnover"`
 }
 
-func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int) ([]Candle, error) {
-	if limit < 1 {
-		limit = 1
+// KlinesRange загружает свечи с пагинацией назад во времени. Это устраняет лимит 1000 свечей одного запроса.
+func (c *Client) KlinesRange(ctx context.Context, symbol, interval string, count int) ([]Candle, error) {
+	if count < 1 {
+		return nil, nil
 	}
-	if limit > 1000 {
-		limit = 1000
+	if count > 10000 {
+		count = 10000
 	}
-	var r struct {
-		List [][]string `json:"list"`
-	}
-	q := url.Values{"category": {"linear"}, "symbol": {symbol}, "interval": {interval}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, "/v5/market/kline", q, &r); err != nil {
-		return nil, err
-	}
-	out := make([]Candle, 0, len(r.List))
-	f := func(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
-	for _, row := range r.List {
-		if len(row) < 7 {
-			continue
+	out := make([]Candle, 0, count)
+	var end int64
+	for len(out) < count {
+		lim := count - len(out)
+		if lim > 1000 {
+			lim = 1000
 		}
-		ms, err := strconv.ParseInt(row[0], 10, 64)
-		if err != nil {
-			continue
+		q := url.Values{"category": {"linear"}, "symbol": {symbol}, "interval": {interval}, "limit": {strconv.Itoa(lim)}}
+		if end > 0 {
+			q.Set("end", strconv.FormatInt(end, 10))
 		}
-		out = append(out, Candle{Time: time.UnixMilli(ms).UTC(), Open: f(row[1]), High: f(row[2]), Low: f(row[3]), Close: f(row[4]), Volume: f(row[5]), Turnover: f(row[6])})
+		var r struct {
+			List [][]string `json:"list"`
+		}
+		if err := c.get(ctx, "/v5/market/kline", q, &r); err != nil {
+			return nil, err
+		}
+		if len(r.List) == 0 {
+			break
+		}
+		oldest := int64(1<<63 - 1)
+		for _, row := range r.List {
+			if len(row) < 7 {
+				continue
+			}
+			ms := i64(row[0])
+			if ms < oldest {
+				oldest = ms
+			}
+			out = append(out, Candle{time.UnixMilli(ms).UTC(), f64(row[1]), f64(row[2]), f64(row[3]), f64(row[4]), f64(row[5]), f64(row[6])})
+		}
+		if oldest == int64(1<<63-1) || len(r.List) < lim {
+			break
+		}
+		end = oldest - 1
 	}
-	// Bybit возвращает свечи от новых к старым; для индикаторов удобнее старые -> новые.
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if len(out) > count {
+		out = out[len(out)-count:]
 	}
 	return out, nil
 }
 
-type Funding struct {
-	Time time.Time
-	Rate float64
+type PriceCandle struct {
+	Time                   time.Time `json:"time"`
+	Open, High, Low, Close float64
 }
 
+// priceKlinesRange — общий загрузчик mark/index свечей.
+func (c *Client) priceKlinesRange(ctx context.Context, path, symbol, interval string, count int) ([]PriceCandle, error) {
+	if count < 1 {
+		return nil, nil
+	}
+	if count > 5000 {
+		count = 5000
+	}
+	out := make([]PriceCandle, 0, count)
+	var end int64
+	for len(out) < count {
+		lim := count - len(out)
+		if lim > 1000 {
+			lim = 1000
+		}
+		q := url.Values{"category": {"linear"}, "symbol": {symbol}, "interval": {interval}, "limit": {strconv.Itoa(lim)}}
+		if end > 0 {
+			q.Set("end", strconv.FormatInt(end, 10))
+		}
+		var r struct {
+			List [][]string `json:"list"`
+		}
+		if err := c.get(ctx, path, q, &r); err != nil {
+			return nil, err
+		}
+		if len(r.List) == 0 {
+			break
+		}
+		old := int64(1<<63 - 1)
+		for _, row := range r.List {
+			if len(row) < 5 {
+				continue
+			}
+			ms := i64(row[0])
+			if ms < old {
+				old = ms
+			}
+			out = append(out, PriceCandle{time.UnixMilli(ms).UTC(), f64(row[1]), f64(row[2]), f64(row[3]), f64(row[4])})
+		}
+		if old == int64(1<<63-1) || len(r.List) < lim {
+			break
+		}
+		end = old - 1
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if len(out) > count {
+		out = out[len(out)-count:]
+	}
+	return out, nil
+}
+
+// MarkKlinesRange возвращает историю mark price.
+func (c *Client) MarkKlinesRange(ctx context.Context, symbol, interval string, count int) ([]PriceCandle, error) {
+	return c.priceKlinesRange(ctx, "/v5/market/mark-price-kline", symbol, interval, count)
+}
+
+// IndexKlinesRange возвращает историю index price.
+func (c *Client) IndexKlinesRange(ctx context.Context, symbol, interval string, count int) ([]PriceCandle, error) {
+	return c.priceKlinesRange(ctx, "/v5/market/index-price-kline", symbol, interval, count)
+}
+
+type Funding struct {
+	Time time.Time `json:"time"`
+	Rate float64   `json:"rate"`
+}
+
+// Funding загружает последние ставки funding.
 func (c *Client) Funding(ctx context.Context, symbol string, limit int) ([]Funding, error) {
 	if limit < 1 {
 		limit = 1
@@ -180,141 +256,202 @@ func (c *Client) Funding(ctx context.Context, symbol string, limit int) ([]Fundi
 	}
 	var r struct {
 		List []struct {
-			Symbol    string `json:"symbol"`
-			Rate      string `json:"fundingRate"`
-			Timestamp string `json:"fundingRateTimestamp"`
+			Rate string `json:"fundingRate"`
+			TS   string `json:"fundingRateTimestamp"`
 		} `json:"list"`
 	}
-	q := url.Values{"category": {"linear"}, "symbol": {symbol}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, "/v5/market/funding/history", q, &r); err != nil {
+	if err := c.get(ctx, "/v5/market/funding/history", url.Values{"category": {"linear"}, "symbol": {symbol}, "limit": {strconv.Itoa(limit)}}, &r); err != nil {
 		return nil, err
 	}
-	out := make([]Funding, 0, len(r.List))
+	o := make([]Funding, 0, len(r.List))
 	for _, x := range r.List {
-		ms, _ := strconv.ParseInt(x.Timestamp, 10, 64)
-		rate, _ := strconv.ParseFloat(x.Rate, 64)
-		out = append(out, Funding{Time: time.UnixMilli(ms).UTC(), Rate: rate})
+		o = append(o, Funding{time.UnixMilli(i64(x.TS)).UTC(), f64(x.Rate)})
 	}
-	return out, nil
+	sort.Slice(o, func(i, j int) bool { return o[i].Time.Before(o[j].Time) })
+	return o, nil
 }
 
 type OpenInterest struct {
-	Time  time.Time
-	Value float64
+	Time  time.Time `json:"time"`
+	Value float64   `json:"value"`
 }
 
-func (c *Client) OpenInterest(ctx context.Context, symbol, interval string, limit int) ([]OpenInterest, error) {
-	if limit < 1 {
-		limit = 1
+// OpenInterest загружает историю OI с cursor-пагинацией.
+func (c *Client) OpenInterest(ctx context.Context, symbol, interval string, count int) ([]OpenInterest, error) {
+	if count < 1 {
+		return nil, nil
 	}
-	if limit > 200 {
-		limit = 200
+	if count > 2000 {
+		count = 2000
 	}
-	var r struct {
-		List []struct {
-			OpenInterest string `json:"openInterest"`
-			Timestamp    string `json:"timestamp"`
-		} `json:"list"`
+	out := make([]OpenInterest, 0, count)
+	cursor := ""
+	for len(out) < count {
+		lim := count - len(out)
+		if lim > 200 {
+			lim = 200
+		}
+		q := url.Values{"category": {"linear"}, "symbol": {symbol}, "intervalTime": {interval}, "limit": {strconv.Itoa(lim)}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		var r struct {
+			List []struct {
+				Value string `json:"openInterest"`
+				TS    string `json:"timestamp"`
+			} `json:"list"`
+			Cursor string `json:"nextPageCursor"`
+		}
+		if err := c.get(ctx, "/v5/market/open-interest", q, &r); err != nil {
+			return nil, err
+		}
+		for _, x := range r.List {
+			out = append(out, OpenInterest{time.UnixMilli(i64(x.TS)).UTC(), f64(x.Value)})
+		}
+		if r.Cursor == "" || len(r.List) == 0 {
+			break
+		}
+		cursor = r.Cursor
 	}
-	q := url.Values{"category": {"linear"}, "symbol": {symbol}, "intervalTime": {interval}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, "/v5/market/open-interest", q, &r); err != nil {
-		return nil, err
-	}
-	out := make([]OpenInterest, 0, len(r.List))
-	for _, x := range r.List {
-		ms, _ := strconv.ParseInt(x.Timestamp, 10, 64)
-		v, _ := strconv.ParseFloat(x.OpenInterest, 64)
-		out = append(out, OpenInterest{Time: time.UnixMilli(ms).UTC(), Value: v})
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if len(out) > count {
+		out = out[len(out)-count:]
 	}
 	return out, nil
 }
 
 type LongShort struct {
-	Time                                                   time.Time
-	BuyRatio, SellRatio, BuyAccountRatio, SellAccountRatio float64
+	Time       time.Time `json:"time"`
+	LongRatio  float64   `json:"long_ratio"`
+	ShortRatio float64   `json:"short_ratio"`
 }
 
-func (c *Client) LongShort(ctx context.Context, symbol, period string, limit int) ([]LongShort, error) {
-	if limit < 1 {
-		limit = 1
+// LongShort загружает историю долей long/short аккаунтов.
+func (c *Client) LongShort(ctx context.Context, symbol, period string, count int) ([]LongShort, error) {
+	if count < 1 {
+		return nil, nil
 	}
-	if limit > 500 {
-		limit = 500
+	if count > 3000 {
+		count = 3000
 	}
-	var r struct {
-		List []struct {
-			BuyRatio         string `json:"buyRatio"`
-			SellRatio        string `json:"sellRatio"`
-			BuyAccountRatio  string `json:"buyRatioByAcct"`
-			SellAccountRatio string `json:"sellRatioByAcct"`
-			Timestamp        string `json:"timestamp"`
-		} `json:"list"`
+	out := make([]LongShort, 0, count)
+	cursor := ""
+	for len(out) < count {
+		lim := count - len(out)
+		if lim > 500 {
+			lim = 500
+		}
+		q := url.Values{"category": {"linear"}, "symbol": {symbol}, "period": {period}, "limit": {strconv.Itoa(lim)}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		var r struct {
+			List []struct {
+				Buy  string `json:"buyRatio"`
+				Sell string `json:"sellRatio"`
+				TS   string `json:"timestamp"`
+			} `json:"list"`
+			Cursor string `json:"nextPageCursor"`
+		}
+		if err := c.get(ctx, "/v5/market/account-ratio", q, &r); err != nil {
+			return nil, err
+		}
+		for _, x := range r.List {
+			out = append(out, LongShort{time.UnixMilli(i64(x.TS)).UTC(), f64(x.Buy), f64(x.Sell)})
+		}
+		if r.Cursor == "" || len(r.List) == 0 {
+			break
+		}
+		cursor = r.Cursor
 	}
-	q := url.Values{"category": {"linear"}, "symbol": {symbol}, "period": {period}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, "/v5/market/account-ratio", q, &r); err != nil {
-		return nil, err
-	}
-	out := make([]LongShort, 0, len(r.List))
-	for _, x := range r.List {
-		ms, _ := strconv.ParseInt(x.Timestamp, 10, 64)
-		br, _ := strconv.ParseFloat(x.BuyRatio, 64)
-		sr, _ := strconv.ParseFloat(x.SellRatio, 64)
-		ba, _ := strconv.ParseFloat(x.BuyAccountRatio, 64)
-		sa, _ := strconv.ParseFloat(x.SellAccountRatio, 64)
-		out = append(out, LongShort{Time: time.UnixMilli(ms).UTC(), BuyRatio: br, SellRatio: sr, BuyAccountRatio: ba, SellAccountRatio: sa})
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if len(out) > count {
+		out = out[len(out)-count:]
 	}
 	return out, nil
 }
 
 type OrderBook struct {
-	BidNotional, AskNotional float64
-	BestBid, BestAsk         float64
-	ImbalancePct             float64
-	Ratio                    float64
-	Levels                   int
+	BestBid      float64 `json:"best_bid"`
+	BestAsk      float64 `json:"best_ask"`
+	BidNotional  float64 `json:"bid_notional"`
+	AskNotional  float64 `json:"ask_notional"`
+	ImbalancePct float64 `json:"imbalance_pct"`
+	Ratio        float64 `json:"bid_ask_ratio"`
+	Levels       int     `json:"levels"`
 }
 
+// OrderBook получает текущий snapshot глубины стакана.
 func (c *Client) OrderBook(ctx context.Context, symbol string, limit int) (OrderBook, error) {
 	if limit < 1 {
 		limit = 1
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > 1000 {
+		limit = 1000
 	}
 	var r struct {
 		Bids [][]string `json:"b"`
 		Asks [][]string `json:"a"`
 	}
-	q := url.Values{"category": {"linear"}, "symbol": {symbol}, "limit": {strconv.Itoa(limit)}}
-	if err := c.get(ctx, "/v5/market/orderbook", q, &r); err != nil {
+	if err := c.get(ctx, "/v5/market/orderbook", url.Values{"category": {"linear"}, "symbol": {symbol}, "limit": {strconv.Itoa(limit)}}, &r); err != nil {
 		return OrderBook{}, err
 	}
 	sum := func(rows [][]string) float64 {
-		var s float64
-		for _, row := range rows {
-			if len(row) >= 2 {
-				p, _ := strconv.ParseFloat(row[0], 64)
-				q, _ := strconv.ParseFloat(row[1], 64)
-				s += p * q
+		z := 0.0
+		for _, x := range rows {
+			if len(x) >= 2 {
+				z += f64(x[0]) * f64(x[1])
 			}
 		}
-		return s
+		return z
 	}
 	b, a := sum(r.Bids), sum(r.Asks)
-	ratio := 0.0
-	if a > 0 {
-		ratio = b / a
-	}
-	imb := 0.0
-	if b+a > 0 {
-		imb = (b - a) / (b + a) * 100
-	}
-	ob := OrderBook{BidNotional: b, AskNotional: a, ImbalancePct: imb, Ratio: ratio, Levels: len(r.Bids)}
+	o := OrderBook{BidNotional: b, AskNotional: a, Levels: len(r.Bids)}
 	if len(r.Bids) > 0 {
-		ob.BestBid, _ = strconv.ParseFloat(r.Bids[0][0], 64)
+		o.BestBid = f64(r.Bids[0][0])
 	}
 	if len(r.Asks) > 0 {
-		ob.BestAsk, _ = strconv.ParseFloat(r.Asks[0][0], 64)
+		o.BestAsk = f64(r.Asks[0][0])
 	}
-	return ob, nil
+	if a > 0 {
+		o.Ratio = b / a
+	}
+	if a+b > 0 {
+		o.ImbalancePct = (b - a) / (b + a) * 100
+	}
+	return o, nil
+}
+
+type Trade struct {
+	Time  time.Time `json:"time"`
+	Price float64   `json:"price"`
+	Size  float64   `json:"size"`
+	Side  string    `json:"side"`
+}
+
+// RecentTrades получает до 1000 последних публичных сделок для оценки taker-flow/CVD snapshot.
+func (c *Client) RecentTrades(ctx context.Context, symbol string, limit int) ([]Trade, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var r struct {
+		List []struct {
+			Price string `json:"price"`
+			Size  string `json:"size"`
+			Side  string `json:"side"`
+			Time  string `json:"time"`
+		} `json:"list"`
+	}
+	if err := c.get(ctx, "/v5/market/recent-trade", url.Values{"category": {"linear"}, "symbol": {symbol}, "limit": {strconv.Itoa(limit)}}, &r); err != nil {
+		return nil, err
+	}
+	o := make([]Trade, 0, len(r.List))
+	for _, x := range r.List {
+		o = append(o, Trade{time.UnixMilli(i64(x.Time)).UTC(), f64(x.Price), f64(x.Size), x.Side})
+	}
+	sort.Slice(o, func(i, j int) bool { return o[i].Time.Before(o[j].Time) })
+	return o, nil
 }
